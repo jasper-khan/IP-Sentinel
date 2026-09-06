@@ -51,8 +51,12 @@ node_port() {
 }
 
 # 活跃会话计数 (每个会话 = 一个 camoufox_session.py 进程)
+# pgrep -fc 无匹配时输出空且 exit 1 → || echo 0 会产生第二行;只取首行数字
 active_sessions() {
-    pgrep -fc "camoufox_session.py" 2>/dev/null || echo 0
+    local n
+    n=$(pgrep -fc "camoufox_session.py" 2>/dev/null)
+    [ -z "$n" ] && n=0
+    echo "$n"
 }
 
 # 该节点是否已有会话在跑 (同节点永不双开)
