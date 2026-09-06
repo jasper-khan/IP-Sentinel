@@ -220,9 +220,11 @@ db_exec "ALTER TABLE nodes ADD COLUMN node_alias TEXT;" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_google TEXT DEFAULT 'true';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_trust TEXT DEFAULT 'true';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_ota TEXT DEFAULT 'false';" 2>/dev/null
-# [V2 安全修复] 每节点独立 PSK 与 TOFU 证书指纹列
+# [V2 安全修复] 每节点独立 PSK 与 TOFU 证书指纹列；[引擎配套] SSH 隧道出口列
 db_exec "ALTER TABLE nodes ADD COLUMN psk TEXT;" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN cert_fp TEXT;" 2>/dev/null
+db_exec "ALTER TABLE nodes ADD COLUMN ssh_port TEXT DEFAULT '22';" 2>/dev/null
+db_exec "ALTER TABLE nodes ADD COLUMN tunnel_user TEXT DEFAULT 'sentinel-tunnel';" 2>/dev/null
 
 db_exec "CREATE TABLE IF NOT EXISTS ip_trend_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -351,28 +353,50 @@ while true; do
             # ----------------------------------------------------------
             if [[ "$TEXT" == *"#REGISTER#"* ]]; then
                 REG_LINE=$(echo "$TEXT" | grep "#REGISTER#" | head -n 1 | tr -d '\` ')
+
+                # [V2 加固] 注册报文含 PSK (敏感凭证)——解析完成后立即删除 TG 消息,
+                # 避免密钥长期留存于聊天历史 (任何能读该聊天的人 = 能伪造指令)
+                if [ -n "$USER_MSG_ID" ]; then
+                    curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_TOKEN}/deleteMessage" \
+                        -d "chat_id=${CHAT_ID}" -d "message_id=${USER_MSG_ID}" >/dev/null 2>&1 || true
+                fi
                 
                 FIELD_COUNT=$(echo "$REG_LINE" | awk -F'|' '{print NF}')
-                if [ "$FIELD_COUNT" -ge 8 ]; then
+                if [ "$FIELD_COUNT" -ge 10 ]; then
+                    IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK RAW_SSH_PORT RAW_TUNNEL_USER <<< "$REG_LINE"
+                elif [ "$FIELD_COUNT" -eq 9 ]; then
+                    IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK RAW_SSH_PORT <<< "$REG_LINE"
+                    RAW_TUNNEL_USER="sentinel-tunnel"
+                elif [ "$FIELD_COUNT" -eq 8 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK <<< "$REG_LINE"
+                    RAW_SSH_PORT="22"
+                    RAW_TUNNEL_USER="sentinel-tunnel"
                 elif [ "$FIELD_COUNT" -eq 7 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA <<< "$REG_LINE"
                     RAW_PSK=""
+                    RAW_SSH_PORT="22"
+                    RAW_TUNNEL_USER="sentinel-tunnel"
                 elif [ "$FIELD_COUNT" -eq 6 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS <<< "$REG_LINE"
                     RAW_OTA="false"
                     RAW_PSK=""
+                    RAW_SSH_PORT="22"
+                    RAW_TUNNEL_USER="sentinel-tunnel"
                 elif [ "$FIELD_COUNT" -eq 5 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT <<< "$REG_LINE"
                     RAW_ALIAS="$RAW_NODE"
                     RAW_OTA="false"
                     RAW_PSK=""
+                    RAW_SSH_PORT="22"
+                    RAW_TUNNEL_USER="sentinel-tunnel"
                 else
                     IFS='|' read -r MAGIC RAW_NODE RAW_IP RAW_PORT <<< "$REG_LINE"
                     RAW_REGION="UNKNOWN"
                     RAW_ALIAS="$RAW_NODE"
                     RAW_OTA="false"
                     RAW_PSK=""
+                    RAW_SSH_PORT="22"
+                    RAW_TUNNEL_USER="sentinel-tunnel"
                 fi
                 
                 CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
@@ -402,8 +426,14 @@ while true; do
                     AGENT_PSK=""
                 fi
 
+                # [引擎配套] SSH 隧道出口信息 (端口+用户) 清洗入库
+                AGENT_SSH_PORT=$(echo "$RAW_SSH_PORT" | tr -cd '0-9' | cut -c 1-5)
+                [ -z "$AGENT_SSH_PORT" ] && AGENT_SSH_PORT="22"
+                AGENT_TUNNEL_USER=$(echo "$RAW_TUNNEL_USER" | tr -cd 'a-zA-Z0-9_-')
+                [ -z "$AGENT_TUNNEL_USER" ] && AGENT_TUNNEL_USER="sentinel-tunnel"
+
                 if [ -n "$AGENT_PSK" ]; then
-                    db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota, psk) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA', '$AGENT_PSK') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA', psk='$AGENT_PSK';"
+                    db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota, psk, ssh_port, tunnel_user) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA', '$AGENT_PSK', '$AGENT_SSH_PORT', '$AGENT_TUNNEL_USER') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA', psk='$AGENT_PSK', ssh_port='$AGENT_SSH_PORT', tunnel_user='$AGENT_TUNNEL_USER';"
                 else
                     db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA';"
                     send_msg "$CHAT_ID" "⚠️ **安全提示**：节点 \`$NODE_ALIAS\` 注册载荷不含独立 PSK (老版本 Agent)。\n仅登记档案，指令下发已被拒绝；请尽快升级该节点以启用每节点密钥。"

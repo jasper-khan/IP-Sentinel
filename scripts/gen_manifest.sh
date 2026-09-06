@@ -31,6 +31,9 @@ PATHS=(
     "core/uninstall.sh"
     "master/tg_master.sh"
     "master/uninstall_master.sh"
+    "master/engine/camoufox_session.py"
+    "master/engine/tunnel_manager.sh"
+    "master/engine/scheduler.sh"
     "data/probe/ip.sh"
     "version.txt"
 )

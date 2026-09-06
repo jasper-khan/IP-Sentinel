@@ -267,7 +267,7 @@ else
         fi
 
         # 组装注册指令
-        REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}"
+        REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}|${SSH_PORT}|${TUNNEL_USER}"
 
         echo -e "\n📤 正在向 Telegram 推送注册指令..."
         TEXT_MSG="✨ *IP-Sentinel 重新发送注册指令！*
@@ -514,8 +514,44 @@ if [ "$UPGRADE_MODE" == "false" ]; then
         else
             echo -e "✅ \033[32m已锁定 Master 出口: $MASTER_EGRESS_IP (指令端口仅对该来源放行)。\033[0m"
         fi
+
+        # [浏览器引擎配套] SSH 出口信息: 引擎经 SSH SOCKS 隧道借用本机出口
+        echo -e "\n\033[36m[4.2/7] SSH 隧道出口配置 (Master 浏览器引擎将经此借用本机 IP)...\033[0m"
+        read -p "请输入本机 SSH 端口 (默认 22): " RAW_SSH_PORT
+        SSH_PORT=$(echo "$RAW_SSH_PORT" | tr -cd '0-9')
+        [ -z "$SSH_PORT" ] && SSH_PORT="22"
+        echo -e "✅ \033[32m已锁定 SSH 出口端口: $SSH_PORT\033[0m"
+
+        TUNNEL_USER="sentinel-tunnel"
+        echo -e "\n\033[36m[4.3/7] Master 引擎隧道公钥装载 (仅转发,无 shell 权限)...\033[0m"
+        echo -e "\033[33m💡 请粘贴 Master 安装完成时展示的隧道公钥 (一行 ssh-ed25519 开头)。\033[0m"
+        echo -e "\033[33m   Master 与 Agent 同机安装或暂不启用浏览器引擎 → 直接回车跳过。\033[0m"
+        read -p "粘贴 Master 隧道公钥: " RAW_TUNNEL_KEY
+        ENGINE_TUNNEL_PUBKEY=$(echo "$RAW_TUNNEL_KEY" | tr -d '\n\r' | grep -E '^ssh-(ed25519|rsa) [A-Za-z0-9+/=]+ .*$')
+
+        if [ -n "$ENGINE_TUNNEL_PUBKEY" ]; then
+            # 低权专用账户: 无 shell、仅允许密钥登录
+            if ! id "$TUNNEL_USER" >/dev/null 2>&1; then
+                useradd -r -M -s /usr/sbin/nologin "$TUNNEL_USER" 2>/dev/null \
+                    || useradd -r -M -s /sbin/nologin "$TUNNEL_USER" 2>/dev/null \
+                    || true
+            fi
+            TUNNEL_SSH_DIR="/home/${TUNNEL_USER}/.ssh"
+            [ -d "$TUNNEL_SSH_DIR" ] || { mkdir -p "$TUNNEL_SSH_DIR" && chown "$TUNNEL_USER":"$TUNNEL_USER" "$TUNNEL_SSH_DIR" && chmod 700 "$TUNNEL_SSH_DIR"; }
+            # 限制: 禁 pty/X11/agent 转发,禁 shell (command=/bin/false),来源限定 Master
+            KEY_OPTS="command=\"/bin/false\",no-pty,no-X11-forwarding,no-agent-forwarding"
+            if [ "$MASTER_EGRESS_IP" != "127.0.0.1" ]; then
+                KEY_OPTS="${KEY_OPTS},from=\"${MASTER_EGRESS_IP}\""
+            fi
+            echo "${KEY_OPTS} ${ENGINE_TUNNEL_PUBKEY}" > "${TUNNEL_SSH_DIR}/authorized_keys"
+            chown "$TUNNEL_USER":"$TUNNEL_USER" "${TUNNEL_SSH_DIR}/authorized_keys" 2>/dev/null || true
+            chmod 600 "${TUNNEL_SSH_DIR}/authorized_keys"
+            echo -e "✅ \033[32m隧道账户 ${TUNNEL_USER} 已装载 Master 公钥 (仅转发/无 shell/限源 ${MASTER_EGRESS_IP})。\033[0m"
+        else
+            echo -e "⚠️ \033[33m未提供公钥——本机暂不提供引擎隧道出口 (可稍后重跑安装补充)。\033[0m"
+        fi
         
-        echo -e "\n\033[36m[4.2/7] 正在构建 Webhook 安全通信隧道...\033[0m"
+        echo -e "\n\033[36m[4.4/7] 正在构建 Webhook 安全通信隧道...\033[0m"
         echo -n "🎲 正在探测可用随机端口..."
         while true; do
             RANDOM_PORT=$((RANDOM % 55536 + 10000))
@@ -733,6 +769,8 @@ TG_API_URL="$TG_API_URL"
 CHAT_ID="$CHAT_ID"
 AGENT_PORT="$AGENT_PORT"
 NODE_PSK="$NODE_PSK"
+SSH_PORT="$SSH_PORT"
+TUNNEL_USER="$TUNNEL_USER"
 INSTALL_DIR="$INSTALL_DIR"
 LOG_FILE="${INSTALL_DIR}/logs/sentinel.log"
 
@@ -860,6 +898,21 @@ if [ "$UPGRADE_MODE" == "true" ]; then
         fi
     else
         NODE_PSK=$(grep "^NODE_PSK=" "$CONFIG_FILE" | cut -d'"' -f2)
+    fi
+
+    # [引擎配套] SSH 隧道出口信息继承 (升级前未配置则用默认值)
+    if [ -z "${SSH_PORT:-}" ]; then
+        SSH_PORT=$(grep "^SSH_PORT=" "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f2)
+        [ -z "$SSH_PORT" ] && SSH_PORT="22"
+    fi
+    if [ -z "${TUNNEL_USER:-}" ]; then
+        TUNNEL_USER=$(grep "^TUNNEL_USER=" "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f2)
+        [ -z "$TUNNEL_USER" ] && TUNNEL_USER="sentinel-tunnel"
+    fi
+    # 隧道账户若在老安装中已建,确保配置有记录
+    if ! grep -q "^SSH_PORT=" "$CONFIG_FILE"; then
+        echo "SSH_PORT=\"$SSH_PORT\"" >> "$CONFIG_FILE"
+        echo "TUNNEL_USER=\"$TUNNEL_USER\"" >> "$CONFIG_FILE"
     fi
 fi
 
@@ -1155,7 +1208,7 @@ EOF
 if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
     
     # 注册报文中塞入多宿主弹匣 SAFE_COMM_IP
-    REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${SAFE_COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}"
+    REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${SAFE_COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}|${SSH_PORT}|${TUNNEL_USER}"
     
     if [ "$UPGRADE_MODE" == "true" ]; then
         OLD_VERSION=$(grep "^AGENT_VERSION=" "$CONFIG_FILE" | cut -d'"' -f2)
