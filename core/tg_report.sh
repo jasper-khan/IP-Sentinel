@@ -146,40 +146,7 @@ else
 📡 **出口 IP**: \`${CURRENT_IP}\`
 🛡️ **IP 属性**: ${IP_TYPE}"
 
-    # 统计 Google 纠偏阵列数据
-    if [ "$ENABLE_GOOGLE" == "true" ]; then
-        GOOGLE_LOGS=$(echo "$LOG_CONTENT" | grep "\[Google")
-        G_TOTAL=$(echo "$GOOGLE_LOGS" | grep "\[START\]" -c)
-        G_SUCCESS=$(echo "$GOOGLE_LOGS" | grep "✅" -c)
-        G_FAILED=$(echo "$GOOGLE_LOGS" | grep "❌" -c)
-        G_WARN=$(echo "$GOOGLE_LOGS" | grep "⚠️" -c)
-        
-        G_RATE="0.0"
-        [ "$G_TOTAL" -gt 0 ] && G_RATE=$(awk "BEGIN {printf \"%.1f\", ($G_SUCCESS/$G_TOTAL)*100}")
-
-        MSG="$MSG
-
-🎯 **[Google 区域纠偏]**
-🚀 执行总数: ${G_TOTAL} 次 (胜率: **${G_RATE}%**)
-✅ 成功: ${G_SUCCESS} | ❌ 送中: ${G_FAILED} | ⚠️ 警告: ${G_WARN}"
-    fi
-
-    # 统计 Trust 净化阵列数据
-    if [ "$ENABLE_TRUST" == "true" ]; then
-        TRUST_LOGS=$(echo "$LOG_CONTENT" | grep "\[Trust")
-        T_TOTAL=$(echo "$TRUST_LOGS" | grep "\[START\]" -c)
-        T_SUCCESS=$(echo "$TRUST_LOGS" | grep "✅" -c)
-        T_FAILED=$(echo "$TRUST_LOGS" | grep "❌" -c)
-        
-        T_RATE="0.0"
-        [ "$T_TOTAL" -gt 0 ] && T_RATE=$(awk "BEGIN {printf \"%.1f\", ($T_SUCCESS/$T_TOTAL)*100}")
-
-        MSG="$MSG
-
-🔰 **[IP 信用净化]**
-🚀 净化总数: ${T_TOTAL} 轮 (成功率: **${T_RATE}%**)
-✅ 成功注入: ${T_SUCCESS} | ❌ 访问受阻: ${T_FAILED}"
-    fi
+    # [引擎代管] 本地 curl 养护已移除,养护统计由 Master 引擎日志承载
 
     # 追加末次快照
     MSG="$MSG

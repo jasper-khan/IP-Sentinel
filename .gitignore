@@ -4,3 +4,4 @@
 .env.d/
 *.env
 !*.env.example
+__pycache__/

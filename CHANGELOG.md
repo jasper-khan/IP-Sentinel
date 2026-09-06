@@ -1,5 +1,19 @@
 # Changelog
 
+## [v5.0.0-fork] - 2026-09-06
+
+### 💥 Breaking Changes (curl 引擎退役)
+
+- **移除本地 curl 养护引擎** — `mod_google.sh` / `mod_trust.sh` / `runner.sh` 删除;所有养护流量由 Master 的 Camoufox 浏览器引擎执行。Agent 本机仅保留: 质量探测 (mod_quality)、TG 报表、webhook 指令面、每日维护巡检
+- **安装链收敛为单一权威** — 移除与 `core/install.sh` 平行的模块化安装链 (`install/build_agent.sh` / `ui_menu` / `net_engine` / `sys_daemon`);根 `install.sh` 现在经 MANIFEST 哈希门禁直接引导 `core/install.sh`。此前模块化链不含任何安全修复,存在并行绕过面
+- **Agent 侧路由收敛** — webhook 移除 `/trigger_run` / `/trigger_google` / `/trigger_trust` / `/trigger_toggle`;Master 移除 all_run / toggle / 模块触发按钮与 enable_google/enable_trust 列
+- **updater 瘦身** — UA 池 / 关键词 / 区域模板每日同步删除 (Agent 不再本地养护);仅保留探针完整性巡检 + 日志瘦身,运行时零下载
+- **UA 指纹工厂退役** — `data/user_agents.txt`、`scripts/ua_generator.py`、`ua_factory.yml` workflow 删除 (指纹由 Camoufox 自洽管理)
+
+### 🐛 Bug Fixes
+
+- **更正历史遗留**: v4.4.0 提交中宣称的 updater.sh mktemp 转换实际未生效 (Windows python3 stub 静默吞掉编辑);本版已随相关代码块整体删除,状态一致
+
 ## [v4.6.0-fork] - 2026-09-06
 
 ### 🐛 Bug Fixes

@@ -1,7 +1,10 @@
 #!/bin/bash
 # ==========================================================
-# 脚本名称: install.sh (动态模块化终极引导入口)
-# 核心功能: 权限鉴定、沙盒创建、Ctrl+C 熔断保护、动态版本嗅探
+# 脚本名称: install.sh (Agent 引导入口)
+# 核心功能: 权限鉴定、拉取唯一权威安装器 (core/install.sh) 并做
+#           MANIFEST.sha256 供应链门禁，Ctrl+C 熔断保护
+# 说明: 本 fork 已收敛为单一安装链 —— core/install.sh 是 Agent
+#       安装的唯一实现 (新装/升级/重注册/卸载全在其内)
 # ==========================================================
 
 if [ "$EUID" -ne 0 ]; then
@@ -24,48 +27,31 @@ trap 'rm -rf "$SECURE_TMP" 2>/dev/null' EXIT HUP
 REPO_RAW_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
 
 # ----------------------------------------------------------
-# [核心架构升级] 动态嗅探云端真理之源 (SSOT)
-# ----------------------------------------------------------
-TARGET_VERSION=$( (curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)" || curl -4 -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)") 2>/dev/null | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
-TARGET_VERSION=${TARGET_VERSION:-"4.3.1"}
-
-echo -e "\n⏳ 正在拉取 IP-Sentinel v${TARGET_VERSION} 安装模块引擎..."
-
-# ----------------------------------------------------------
-# [V3 安全修复] 供应链完整性门禁：下载的引擎脚本必须与仓库
-# MANIFEST.sha256 锁定哈希一致，否则拒绝以 root 执行。
-# (bash -n 只是防截断的附加检查，不构成内容校验)
+# [V3 供应链门禁] 安装器本体必须与 MANIFEST.sha256 锁定哈希一致
 # ----------------------------------------------------------
 curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/MANIFEST.sha256?t=$(date +%s)" -o "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null
 
 if [ -s "${SECURE_TMP}/MANIFEST.sha256" ]; then
-    MANIFEST_EXPECTED=$(awk '$2 == "install/build_agent.sh" {print $1}' "${SECURE_TMP}/MANIFEST.sha256")
+    MANIFEST_EXPECTED=$(awk '$2 == "core/install.sh" {print $1}' "${SECURE_TMP}/MANIFEST.sha256")
 fi
 
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/install/build_agent.sh?t=$(date +%s)" -o "${SECURE_TMP}/build_agent.sh"
+curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/install.sh?t=$(date +%s)" -o "${SECURE_TMP}/install_core.sh"
 
-if [ ! -s "${SECURE_TMP}/build_agent.sh" ]; then
+if [ ! -s "${SECURE_TMP}/install_core.sh" ]; then
     echo -e "\033[31m❌ 致命错误：核心安装引擎拉取失败！网络阻断或 GitHub Raw 异常。\033[0m"
     exit 1
 fi
 
-# [完整性熔断] 无清单或哈希不匹配 → 拒绝执行
-MANIFEST_ACTUAL=$(sha256sum "${SECURE_TMP}/build_agent.sh" | awk '{print $1}')
+MANIFEST_ACTUAL=$(sha256sum "${SECURE_TMP}/install_core.sh" | awk '{print $1}')
 if [ -z "$MANIFEST_EXPECTED" ] || [ "$MANIFEST_EXPECTED" != "$MANIFEST_ACTUAL" ]; then
     echo -e "\033[31m❌ 供应链熔断：安装引擎哈希与 MANIFEST.sha256 不符 (或清单缺失)。\033[0m"
     echo -e "\033[31m   可能原因：下载被劫持/污染，或仓库发布流程遗漏清单。已拒绝执行。\033[0m"
     exit 1
 fi
-if ! bash -n "${SECURE_TMP}/build_agent.sh"; then
+if ! bash -n "${SECURE_TMP}/install_core.sh"; then
     echo -e "\033[31m❌ 安装引擎语法校验失败，疑似下载截断。已拒绝执行。\033[0m"
     exit 1
 fi
 
-export SECURE_TMP
-export REPO_RAW_URL
-export TARGET_VERSION
-
-chmod +x "${SECURE_TMP}/build_agent.sh"
-bash "${SECURE_TMP}/build_agent.sh"
-
-exit $?
+chmod +x "${SECURE_TMP}/install_core.sh"
+exec bash "${SECURE_TMP}/install_core.sh"

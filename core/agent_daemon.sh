@@ -236,50 +236,12 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
 
         # ==========================================================
         # [指令分发] 模块级业务路由矩阵 (精确匹配策略)
+        # 注: 本地 curl 养护引擎 (runner/mod_google/mod_trust) 已移除,
+        #     养护由 Master 浏览器引擎执行;本机保留 报表/日志/质量探测/改名/OTA/凭证切换
         # ==========================================================
-        
-        # 路由 0: 全局统筹调度
-        if req_path == '/trigger_run':
-            if os.path.exists('/opt/ip_sentinel/core/runner.sh'):
-                self.send_response(200)
-                self.send_header("Content-type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"Action Accepted: runner\n")
-                os.system("nohup bash /opt/ip_sentinel/core/runner.sh >/dev/null 2>&1 &")
-            else:
-                self.send_response(404)
-                self.end_headers()
-                
-        # 路由 1: Google 区域纠偏探测
-        elif req_path == '/trigger_google':
-            if os.path.exists('/opt/ip_sentinel/core/mod_google.sh'):
-                self.send_response(200)
-                self.send_header("Content-type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"Action Accepted: mod_google\n")
-                os.system("nohup bash /opt/ip_sentinel/core/mod_google.sh >/dev/null 2>&1 &")
-            else:
-                self.send_response(403)
-                self.send_header("Content-type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"403 Forbidden: Google Module Disabled\n")
 
-        # 路由 2: IP 信用数据清洗
-        elif req_path == '/trigger_trust':
-            if os.path.exists('/opt/ip_sentinel/core/mod_trust.sh'):
-                self.send_response(200)
-                self.send_header("Content-type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"Action Accepted: mod_trust\n")
-                os.system("nohup bash /opt/ip_sentinel/core/mod_trust.sh >/dev/null 2>&1 &")
-            else:
-                self.send_response(403)
-                self.send_header("Content-type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"403 Forbidden: Trust Module Disabled\n")
-
-        # 路由 3: 触发异步战报生成
-        elif req_path == '/trigger_report':
+        # 路由 1: 触发异步战报生成
+        if req_path == '/trigger_report':
             self.send_response(200)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
@@ -413,52 +375,6 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(400)
             self.end_headers()
             self.wfile.write(b"400 Bad Request: Invalid Characters\n")
-
-        # 路由 7: 功能模块动态起停 (Feature Flag API)
-        elif req_path == '/trigger_toggle':
-            mod_name = query.get('mod', [''])[0]
-            target_state = query.get('state', [''])[0].lower()
-            
-            if mod_name not in ['google', 'trust'] or target_state not in ['true', 'false']:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"400 Bad Request: Invalid parameters\n")
-                return
-                
-            config_key = f"ENABLE_{mod_name.upper()}="
-            
-            try:
-                config_path = '/opt/ip_sentinel/config.conf'
-                import fcntl
-                
-                with open(config_path, 'r+', encoding='utf-8', errors='ignore') as f:
-                    fcntl.flock(f, fcntl.LOCK_EX)
-                    lines = f.readlines()
-                    
-                    found = False
-                    for i, line in enumerate(lines):
-                        if line.startswith(config_key):
-                            lines[i] = f'{config_key}"{target_state}"\n'
-                            found = True
-                            break
-                            
-                    if not found:
-                        lines.append(f'{config_key}"{target_state}"\n')
-                        
-                    f.seek(0)
-                    f.writelines(lines)
-                    f.truncate()
-                    fcntl.flock(f, fcntl.LOCK_UN)
-                
-                self.send_response(200)
-                self.send_header("Content-type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"Action Accepted: trigger_toggle\n")
-                
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(f"500 Internal Error\n".encode('utf-8'))
 
         # 路由 8: 零信任 OTA 远程热更新链路
         elif req_path == '/trigger_ota':

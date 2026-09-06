@@ -217,8 +217,6 @@ db_exec "PRAGMA synchronous=NORMAL;" > /dev/null 2>&1
 
 db_exec "ALTER TABLE nodes ADD COLUMN region TEXT DEFAULT 'UNKNOWN';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN node_alias TEXT;" 2>/dev/null
-db_exec "ALTER TABLE nodes ADD COLUMN enable_google TEXT DEFAULT 'true';" 2>/dev/null
-db_exec "ALTER TABLE nodes ADD COLUMN enable_trust TEXT DEFAULT 'true';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_ota TEXT DEFAULT 'false';" 2>/dev/null
 # [V2 安全修复] 每节点独立 PSK 与 TOFU 证书指纹列；[引擎配套] SSH 隧道出口列；[persona] 区域参数列
 db_exec "ALTER TABLE nodes ADD COLUMN psk TEXT;" 2>/dev/null
@@ -511,9 +509,9 @@ while true; do
                     NODE_COUNT=$(db_exec "SELECT COUNT(*) FROM nodes WHERE chat_id='$CHAT_ID';")
 
                     if [ "$IS_OFFICIAL_GATEWAY" != "true" ]; then
-                        BTNS="[${BTN_MASTER_OTA}[{\"text\":\"🌍 进入全球雷达 (管理节点)\",\"callback_data\":\"list_nodes\"}], [{\"text\":\"🚀 唤醒全局巡逻\",\"callback_data\":\"all_run\"}, {\"text\":\"📊 获取全局简报\",\"callback_data\":\"all_reports\"}], [{\"text\":\"🔄 全网节点 OTA 热重载\",\"callback_data\":\"all_ota_confirm\"}, {\"text\":\"🔁 全舰队切换 Bot 凭证\",\"callback_data\":\"reconfig_confirm\"}], [{\"text\":\"🌟 前往 GitHub 点亮星标\",\"url\":\"https://github.com/jasper-khan/IP-Sentinel\"}]]"
+                        BTNS="[${BTN_MASTER_OTA}[{\"text\":\"🌍 进入全球雷达 (管理节点)\",\"callback_data\":\"list_nodes\"}], [{\"text\":\"📊 获取全局简报\",\"callback_data\":\"all_reports\"}], [{\"text\":\"🔄 全网节点 OTA 热重载\",\"callback_data\":\"all_ota_confirm\"}, {\"text\":\"🔁 全舰队切换 Bot 凭证\",\"callback_data\":\"reconfig_confirm\"}], [{\"text\":\"🌟 前往 GitHub 点亮星标\",\"url\":\"https://github.com/jasper-khan/IP-Sentinel\"}]]"
                     else
-                        BTNS="[[{\"text\":\"🌍 进入全球雷达 (管理节点)\",\"callback_data\":\"list_nodes\"}], [{\"text\":\"🚀 唤醒全局巡逻\",\"callback_data\":\"all_run\"}, {\"text\":\"📊 获取全局简报\",\"callback_data\":\"all_reports\"}], [{\"text\":\"🌟 前往 GitHub 点亮星标\",\"url\":\"https://github.com/jasper-khan/IP-Sentinel\"}]]"
+                        BTNS="[[{\"text\":\"🌍 进入全球雷达 (管理节点)\",\"callback_data\":\"list_nodes\"}], [{\"text\":\"📊 获取全局简报\",\"callback_data\":\"all_reports\"}], [{\"text\":\"🌟 前往 GitHub 点亮星标\",\"url\":\"https://github.com/jasper-khan/IP-Sentinel\"}]]"
                     fi
                     DISP_MASTER="${MASTER_NODE_NAME:-未命名中枢}"
                     
@@ -675,18 +673,7 @@ while true; do
                     fi
                     ;;
 
-                "all_run")
-                    NODE_DATA=$(db_exec "SELECT node_name, agent_ip, agent_port FROM nodes WHERE chat_id='$CHAT_ID';")
-                    if [ -z "$NODE_DATA" ]; then
-                        render_msg "$CHAT_ID" "$MSG_ID" "⚠️ 您名下暂无已登记的节点。"
-                    else
-                        render_msg "$CHAT_ID" "$MSG_ID" "📢 **司令部指令下达：正在唤醒所有哨兵执行系统维护...**"
-                        echo "$NODE_DATA" | while IFS='|' read -r NNAME AIP APORT; do
-                            call_agent "$NNAME" "$AIP" "$APORT" "/trigger_run" "" > /dev/null &
-                            sleep 0.2  
-                        done
-                    fi
-                    ;;
+                # [引擎代管] "all_run" 本地巡逻指令已移除 (养护由 Master 浏览器引擎执行)
 
                 "/quality"|"/quality@"*)
                     TARGET_NODE=$(echo "$TEXT" | awk '{print $2}')
@@ -812,93 +799,27 @@ while true; do
                     TARGET_NODE=$(echo "${TEXT#*:}" | tr -cd 'a-zA-Z0-9_.-')
                     TARGET_ALIAS=$(db_exec "SELECT IFNULL(node_alias, node_name) FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
                     [ -z "$TARGET_ALIAS" ] && TARGET_ALIAS="$TARGET_NODE"
-                    
-                    TOGGLE_INFO=$(db_exec "SELECT enable_google, enable_trust, enable_ota, agent_ip, IFNULL(last_seen, '未知') FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
-                    ST_GOOGLE=$(echo "$TOGGLE_INFO" | cut -d'|' -f1)
-                    ST_TRUST=$(echo "$TOGGLE_INFO" | cut -d'|' -f2)
-                    ST_OTA=$(echo "$TOGGLE_INFO" | cut -d'|' -f3)
-                    A_IP=$(echo "$TOGGLE_INFO" | cut -d'|' -f4)
-                    LAST_SEEN=$(echo "$TOGGLE_INFO" | cut -d'|' -f5)
-                    
-                    [ "$ST_GOOGLE" == "true" ] && BTN_G="🟢 Google巡逻: 已开" && ACT_G="false" || { BTN_G="🔴 Google巡逻: 已停"; ACT_G="true"; }
-                    [ "$ST_TRUST" == "true" ] && BTN_T="🟢 信用净化: 已开" && ACT_T="false" || { BTN_T="🔴 信用净化: 已停"; ACT_T="true"; }
 
-                    BTN_ACTION="[{\"text\":\"📍 触发 Google 纠偏\",\"callback_data\":\"google:$TARGET_NODE\"}, {\"text\":\"🛡️ 触发信用净化\",\"callback_data\":\"trust:$TARGET_NODE\"}], [{\"text\":\"🔍 投放深海声呐 (查IP质量)\",\"callback_data\":\"quality:$TARGET_NODE\"}, {\"text\":\"📈 查看 IP 污染趋势图\",\"callback_data\":\"trend:$TARGET_NODE\"}], [{\"text\":\"📜 提取终端实时日志\",\"callback_data\":\"log:$TARGET_NODE\"}, {\"text\":\"📊 生成单机战报\",\"callback_data\":\"report:$TARGET_NODE\"}]"
-                    BTN_TOGGLE="[{\"text\":\"$BTN_G\",\"callback_data\":\"toggle:google:$TARGET_NODE:$ACT_G\"}, {\"text\":\"$BTN_T\",\"callback_data\":\"toggle:trust:$TARGET_NODE:$ACT_T\"}]"
+                    TOGGLE_INFO=$(db_exec "SELECT enable_ota, agent_ip, IFNULL(last_seen, '未知') FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
+                    ST_OTA=$(echo "$TOGGLE_INFO" | cut -d'|' -f1)
+                    A_IP=$(echo "$TOGGLE_INFO" | cut -d'|' -f2)
+                    LAST_SEEN=$(echo "$TOGGLE_INFO" | cut -d'|' -f3)
+
+                    # [引擎代管] 本地 curl 模块开关/触发按钮已移除 (养护由 Master 浏览器引擎执行)
+                    BTN_ACTION="[{\"text\":\"🔍 投放深海声呐 (查IP质量)\",\"callback_data\":\"quality:$TARGET_NODE\"}, {\"text\":\"📈 查看 IP 污染趋势图\",\"callback_data\":\"trend:$TARGET_NODE\"}], [{\"text\":\"📜 提取终端实时日志\",\"callback_data\":\"log:$TARGET_NODE\"}, {\"text\":\"📊 生成单机战报\",\"callback_data\":\"report:$TARGET_NODE\"}]"
 
                     if [ "$IS_OFFICIAL_GATEWAY" != "true" ] && [ "$ST_OTA" == "true" ]; then
                         BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}, {\"text\":\"🆙 OTA 静默升级\",\"callback_data\":\"ota_confirm:$TARGET_NODE\"}]"
                     else
                         BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}]"
                     fi
-                    
+
                     BTN_DANGER="[{\"text\":\"🗑️ 从中枢销毁该档案\",\"callback_data\":\"del_confirm:$TARGET_NODE\"}, {\"text\":\"⬅️ 返回战区列表\",\"callback_data\":\"list_nodes\"}]"
 
-                    BTNS="[$BTN_ACTION, $BTN_TOGGLE, $BTN_CONFIG, $BTN_DANGER]"
-                    TEXT_MSG="⚙️ **目标锁定**: \`$TARGET_ALIAS\`\n(底层标识: \`$TARGET_NODE\`)\n🌐 IP 坐标: \`$A_IP\`\n🕒 档案登记时间: \`$LAST_SEEN\`\n\n请下达精确控制指令："
+                    BTNS="[$BTN_ACTION, $BTN_CONFIG, $BTN_DANGER]"
+                    TEXT_MSG="⚙️ **目标锁定**: \`$TARGET_ALIAS\`\n(底层标识: \`$TARGET_NODE\`)\n🌐 IP 坐标: \`$A_IP\`\n🕒 档案登记时间: \`$LAST_SEEN\`\n\n🤖 养护引擎: Master 浏览器代管 (区域自检见 engine 日志)\n\n请下达精确控制指令："
 
                     render_ui "$CHAT_ID" "$MSG_ID" "$TEXT_MSG" "$BTNS"
-                    ;;
-
-                toggle:*)
-                    IFS=':' read -r CMD MOD_NAME TARGET_NODE TARGET_STATE <<< "$TEXT"
-                    CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
-                    
-                    if [[ ! "$MOD_NAME" =~ ^(google|trust)$ ]] || [[ ! "$TARGET_STATE" =~ ^(true|false)$ ]] || [[ ! "$TARGET_NODE" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-                        render_msg "$CHAT_ID" "$MSG_ID" "⛔ 安全拦截：控制参数不合法！"
-                        continue
-                    fi
-                    
-                    VALID_OWNER=$(db_exec "SELECT 1 FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
-                    if [ "$VALID_OWNER" != "1" ]; then
-                        continue
-                    fi
-                    
-                    AGENT_INFO=$(db_exec "SELECT agent_ip, agent_port FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
-                    AGENT_IP=$(echo "$AGENT_INFO" | cut -d'|' -f1)
-                    AGENT_PORT=$(echo "$AGENT_INFO" | cut -d'|' -f2)
-                    
-                    if [ -n "$AGENT_IP" ] && [ -n "$AGENT_PORT" ]; then
-                        RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_toggle" "mod=${MOD_NAME}&state=${TARGET_STATE}")
-                        
-                        if [[ "$RESPONSE" == *"Action Accepted"* ]]; then
-                            db_exec "UPDATE nodes SET enable_${MOD_NAME}='$TARGET_STATE' WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE';"
-                            
-                            TOGGLE_INFO=$(db_exec "SELECT enable_google, enable_trust FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
-                            ST_GOOGLE=$(echo "$TOGGLE_INFO" | cut -d'|' -f1)
-                            ST_TRUST=$(echo "$TOGGLE_INFO" | cut -d'|' -f2)
-                            [ "$ST_GOOGLE" == "true" ] && BTN_G="🔴 停用 Google 纠偏" && ACT_G="false" || { BTN_G="🟢 启用 Google 纠偏"; ACT_G="true"; }
-                            [ "$ST_TRUST" == "true" ] && BTN_T="🔴 停用信用净化" && ACT_T="false" || { BTN_T="🟢 启用信用净化"; ACT_T="true"; }
-                            
-                            TOGGLE_INFO=$(db_exec "SELECT enable_google, enable_trust, enable_ota, agent_ip, IFNULL(last_seen, '未知') FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
-                            ST_GOOGLE=$(echo "$TOGGLE_INFO" | cut -d'|' -f1)
-                            ST_TRUST=$(echo "$TOGGLE_INFO" | cut -d'|' -f2)
-                            ST_OTA=$(echo "$TOGGLE_INFO" | cut -d'|' -f3)
-                            A_IP=$(echo "$TOGGLE_INFO" | cut -d'|' -f4)
-                            LAST_SEEN=$(echo "$TOGGLE_INFO" | cut -d'|' -f5)
-
-                            [ "$ST_GOOGLE" == "true" ] && BTN_G="🟢 Google巡逻: 已开" && ACT_G="false" || { BTN_G="🔴 Google巡逻: 已停"; ACT_G="true"; }
-                            [ "$ST_TRUST" == "true" ] && BTN_T="🟢 信用净化: 已开" && ACT_T="false" || { BTN_T="🔴 信用净化: 已停"; ACT_T="true"; }
-
-                            BTN_ACTION="[{\"text\":\"📍 触发 Google 纠偏\",\"callback_data\":\"google:$TARGET_NODE\"}, {\"text\":\"🛡️ 触发信用净化\",\"callback_data\":\"trust:$TARGET_NODE\"}], [{\"text\":\"🔍 投放深海声呐 (查IP质量)\",\"callback_data\":\"quality:$TARGET_NODE\"}, {\"text\":\"📈 查看 IP 污染趋势图\",\"callback_data\":\"trend:$TARGET_NODE\"}], [{\"text\":\"📜 提取终端实时日志\",\"callback_data\":\"log:$TARGET_NODE\"}, {\"text\":\"📊 生成单机战报\",\"callback_data\":\"report:$TARGET_NODE\"}]"
-                            BTN_TOGGLE="[{\"text\":\"$BTN_G\",\"callback_data\":\"toggle:google:$TARGET_NODE:$ACT_G\"}, {\"text\":\"$BTN_T\",\"callback_data\":\"toggle:trust:$TARGET_NODE:$ACT_T\"}]"
-                            
-                            if [ "$IS_OFFICIAL_GATEWAY" != "true" ] && [ "$ST_OTA" == "true" ]; then
-                                BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}, {\"text\":\"🆙 OTA 静默升级\",\"callback_data\":\"ota_confirm:$TARGET_NODE\"}]"
-                            else
-                                BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}]"
-                            fi
-                            BTN_DANGER="[{\"text\":\"🗑️ 从中枢销毁该档案\",\"callback_data\":\"del_confirm:$TARGET_NODE\"}, {\"text\":\"⬅️ 返回战区列表\",\"callback_data\":\"list_nodes\"}]"
-
-                            BTNS="[$BTN_ACTION, $BTN_TOGGLE, $BTN_CONFIG, $BTN_DANGER]"
-                            TARGET_ALIAS=$(db_exec "SELECT IFNULL(node_alias, node_name) FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
-                            
-                            TEXT_MSG="⚙️ **目标锁定**: \`$TARGET_ALIAS\`\n(底层标识: \`$TARGET_NODE\`)\n🌐 IP 坐标: \`$A_IP\`\n🕒 档案登记时间: \`$LAST_SEEN\`\n\n✅ **执行成功**: 模块 [$MOD_NAME] 状态已切换为 $TARGET_STATE！"
-                            render_ui "$CHAT_ID" "$MSG_ID" "$TEXT_MSG" "$BTNS"
-                        else
-                            render_msg "$CHAT_ID" "$MSG_ID" "❌ 指令下发失败，安全策略禁止降级重试。"
-                        fi
-                    fi
                     ;;
 
                 del_confirm:*)
@@ -1009,7 +930,7 @@ while true; do
                     fi
                     ;;
 
-                google:*|trust:*|run:*|report:*|log:*|quality:*)
+                report:*|log:*|quality:*)
                     ACTION_TYPE=$(echo "$TEXT" | cut -d':' -f1)
                     TARGET_NODE=$(echo "$TEXT" | cut -d':' -f2 | tr -cd 'a-zA-Z0-9_.-')
                     CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
@@ -1028,15 +949,11 @@ while true; do
                         elif [[ "$RESPONSE" == *"403"* ]]; then
                             send_msg "$CHAT_ID" "⚠️ **拒绝执行**：该节点未在本地开启此模块，请检查安装时的配置！"
                         else
-                            if [ "$ACTION_TYPE" == "google" ] || [ "$ACTION_TYPE" == "run" ]; then 
-                                send_msg "$CHAT_ID" "✅ 节点 \`$TARGET_NODE\` 回应: 📍 Google 纠偏程序启动。"
-                            elif [ "$ACTION_TYPE" == "trust" ]; then 
-                                send_msg "$CHAT_ID" "✅ 节点 \`$TARGET_NODE\` 回应: 🛡️ IP 信用净化程序启动。"
-                            elif [ "$ACTION_TYPE" == "quality" ]; then 
+                            if [ "$ACTION_TYPE" == "quality" ]; then
                                 send_msg "$CHAT_ID" "✅ 节点 \`$TARGET_NODE\` 回应: 🔍 深海声呐已投放！请等待异步战报回传。"
-                            elif [ "$ACTION_TYPE" == "log" ]; then 
+                            elif [ "$ACTION_TYPE" == "log" ]; then
                                 send_msg "$CHAT_ID" "✅ 节点 \`$TARGET_NODE\` 正在抓取日志..."
-                            else 
+                            else
                                 send_msg "$CHAT_ID" "✅ 节点 \`$TARGET_NODE\` 接收指令: $ACTION_TYPE"
                             fi
                         fi

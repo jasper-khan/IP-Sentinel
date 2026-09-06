@@ -443,26 +443,11 @@ if [ "$UPGRADE_MODE" == "false" ]; then
     rm -f "${SECURE_TMP}/map.json" "${SECURE_TMP}/continents.txt" "${SECURE_TMP}/countries.txt" "${SECURE_TMP}/states.txt" "${SECURE_TMP}/cities.txt"
 
     mkdir -p "${INSTALL_DIR}/core"
-    mkdir -p "${INSTALL_DIR}/data/keywords"
     mkdir -p "${INSTALL_DIR}/data/regions/${COUNTRY_ID}/${STATE_ID}"
     mkdir -p "${INSTALL_DIR}/logs"
 
-    echo -e "\n[3/7] 正在初始化养护模块 (支持 TG 远程动态启停)..."
-    echo -e "\033[36m[3.1/7] 本机养护引擎选择:\033[0m"
-    echo "  1) 🤖 由 Master 浏览器引擎代管 (推荐: Master 装有 Camoufox 引擎时)"
-    echo "     —— 本地 curl 养护关闭,流量由 Master 经 SSH 隧道以真浏览器执行"
-    echo "  2) 🔄 本地 curl 养护 (经典模式: 每 20 分钟本机执行,无引擎依赖)"
-    read -p "请输入选择 [1-2] (默认1): " ENGINE_MODE_CHOICE
-    ENGINE_MODE_CHOICE=${ENGINE_MODE_CHOICE:-1}
-    if [ "$ENGINE_MODE_CHOICE" == "1" ]; then
-        ENABLE_GOOGLE="false"
-        ENABLE_TRUST="false"
-        echo -e "✅ \033[32m已选择引擎代管: 本地 curl 养护关闭 (mod_quality 质量探测与 TG 报表保留)。\033[0m"
-    else
-        ENABLE_GOOGLE="true"
-        ENABLE_TRUST="true"
-        echo -e "✅ \033[32m已选择本地养护: 每 20 分钟本机 curl 巡逻。\033[0m"
-    fi
+    echo -e "\n[3/7] 养护模式: Master 浏览器引擎代管 (本地 curl 引擎已移除)..."
+    echo -e "✅ \033[32m本机养护流量将由 Master 的 Camoufox 引擎经 SSH 隧道执行;本机保留质量探测与 TG 报表。\033[0m"
 
     echo -e "\n[4/7] 是否接入 Master 司令部进行远程联控？ (y/n)"
     read -p "请输入选择 [y/n] (默认n): " TG_CHOICE
@@ -776,10 +761,6 @@ BASE_LON="$BASE_LON"
 LANG_PARAMS="$LANG_PARAMS"
 VALID_URL_SUFFIX="$VALID_URL_SUFFIX"
 
-# 模块开关状态
-ENABLE_GOOGLE="$ENABLE_GOOGLE"
-ENABLE_TRUST="$ENABLE_TRUST"
-
 TG_TOKEN="$TG_TOKEN"
 TG_API_URL="$TG_API_URL"
 CHAT_ID="$CHAT_ID"
@@ -937,22 +918,18 @@ fi
 # 必须保证核心模块物理就绪后，才允许向当前正在运行的旧引擎开火
 # ==========================================================
 echo -e "\n[6/7] 正在部署核心引擎与热数据..."
-mkdir -p "${INSTALL_DIR}/data/keywords"
 
 TMP_CORE="${SECURE_TMP}/core_update"
 mkdir -p "$TMP_CORE"
 
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/runner.sh" -o "${TMP_CORE}/runner.sh"
 curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/updater.sh" -o "${TMP_CORE}/updater.sh"
 curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/tg_report.sh" -o "${TMP_CORE}/tg_report.sh"
 curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/agent_daemon.sh" -o "${TMP_CORE}/agent_daemon.sh"
 curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/uninstall.sh" -o "${TMP_CORE}/uninstall.sh"
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/mod_google.sh" -o "${TMP_CORE}/mod_google.sh"
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/mod_trust.sh" -o "${TMP_CORE}/mod_trust.sh"
 curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/mod_quality.sh" -o "${TMP_CORE}/mod_quality.sh"
 
 # 🛡️ 终极自检墙：一旦任意文件缺失或长度为零，直接熔断放弃覆写，确保宿主不宕机
-if [ ! -s "${TMP_CORE}/runner.sh" ] || [ ! -s "${TMP_CORE}/agent_daemon.sh" ]; then
+if [ ! -s "${TMP_CORE}/agent_daemon.sh" ] || [ ! -s "${TMP_CORE}/mod_quality.sh" ]; then
     echo -e "\033[31m❌ 致命错误：核心代码拉取失败！网络阻断或 GitHub Raw 异常。\033[0m"
     echo "🛡️ 防砖机制触发：已中止覆盖，旧版哨兵引擎仍安全存活中。"
     rm -rf "$TMP_CORE"
@@ -967,6 +944,8 @@ fi
 pkill -9 -f "webhook.py" >/dev/null 2>&1 || true
 pkill -9 -f "agent_daemon.sh" >/dev/null 2>&1 || true
 pkill -9 -f "runner.sh" >/dev/null 2>&1 || true
+pkill -9 -f "mod_google.sh" >/dev/null 2>&1 || true
+pkill -9 -f "mod_trust.sh" >/dev/null 2>&1 || true
 pkill -9 -f "tg_report.sh" >/dev/null 2>&1 || true
 pkill -9 -f "updater.sh" >/dev/null 2>&1 || true
 pkill -9 -f "sentinel_scheduler.sh" >/dev/null 2>&1 || true
@@ -974,6 +953,10 @@ pkill -9 -f "sentinel_scheduler.sh" >/dev/null 2>&1 || true
 rm -rf "${INSTALL_DIR}/core" 2>/dev/null
 mv "$TMP_CORE" "${INSTALL_DIR}/core"
 chmod +x ${INSTALL_DIR}/core/*.sh
+# [残留清扫] 抹除历史版本的本地 curl 引擎 (runner/mod_google/mod_trust) 与 UA 池
+rm -f "${INSTALL_DIR}/core/runner.sh" "${INSTALL_DIR}/core/mod_google.sh" "${INSTALL_DIR}/core/mod_trust.sh" 2>/dev/null
+rm -f "${INSTALL_DIR}/data/user_agents.txt" 2>/dev/null
+rm -rf "${INSTALL_DIR}/data/keywords" 2>/dev/null
 
 # ==========================================================
 # [供应链防线] 部署 vendored 探针 + SHA-256 锁定清单
@@ -998,13 +981,6 @@ else
     exit 1
 fi
 
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/user_agents.txt" -o "${INSTALL_DIR}/data/user_agents.txt"
-if [ "$UPGRADE_MODE" == "false" ]; then
-    curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/keywords/${KEYWORD_FILE}" -o "${INSTALL_DIR}/data/keywords/${KEYWORD_FILE}"
-else
-    curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/keywords/kw_${REGION_CODE}.txt" -o "${INSTALL_DIR}/data/keywords/kw_${REGION_CODE}.txt" 2>/dev/null || true
-fi
-
 # ==========================================================
 # [进程守护] Systemd 原生注入与微内核定时降级兜底
 # ==========================================================
@@ -1013,43 +989,14 @@ echo -e "\n[7/7] 正在注入系统守护进程与调度器..."
 DEPLOY_UTC_HOUR=$(date -u +%H)
 DEPLOY_UTC_MIN=$(date -u +%M)
 
-echo $(date -u +%s) > "${INSTALL_DIR}/core/.ua_last_update"
 
 if is_systemd; then
     echo "💡 检测到 Systemd 环境，正在部署原生守护服务..."
 
-    # [引擎代管模式] 本地 curl 模块全关时,不部署 20 分钟 runner 巡逻 (养护由 Master 引擎执行)
-    if [ "$ENABLE_GOOGLE" != "true" ] && [ "$ENABLE_TRUST" != "true" ]; then
-        echo "🤖 引擎代管模式: 跳过本地 runner.timer 部署 (养护由 Master 浏览器引擎执行)"
-        rm -f /etc/systemd/system/ip-sentinel-runner.service /etc/systemd/system/ip-sentinel-runner.timer
-        systemctl disable --now ip-sentinel-runner.timer >/dev/null 2>&1 || true
-    else
-    cat > /etc/systemd/system/ip-sentinel-runner.service << EOF
-[Unit]
-Description=IP-Sentinel Runner Service
-After=network.target
-[Service]
-Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-SyslogIdentifier=ip-sentinel
-Type=oneshot
-ExecStart=/bin/bash ${INSTALL_DIR}/core/runner.sh
-User=root
-CPUSchedulingPolicy=idle
-IOSchedulingClass=idle
-EOF
-
-    cat > /etc/systemd/system/ip-sentinel-runner.timer << EOF
-[Unit]
-Description=Timer for IP-Sentinel Runner Service
-[Timer]
-OnCalendar=*:0/20
-RandomizedDelaySec=180
-Persistent=true
-Unit=ip-sentinel-runner.service
-[Install]
-WantedBy=timers.target
-EOF
-    fi
+    # [引擎代管] 本地 curl 巡逻已移除,养护由 Master 浏览器引擎执行;
+    # 抹除历史版本可能遗留的 runner 单元
+    rm -f /etc/systemd/system/ip-sentinel-runner.service /etc/systemd/system/ip-sentinel-runner.timer
+    systemctl disable --now ip-sentinel-runner.timer >/dev/null 2>&1 || true
 
     cat > /etc/systemd/system/ip-sentinel-updater.service << EOF
 [Unit]
@@ -1077,8 +1024,6 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    # runner.timer 仅在本地养护模式下存在 (引擎代管模式已跳过生成)
-    systemctl enable --now ip-sentinel-runner.timer >/dev/null 2>&1 || true
     systemctl enable --now ip-sentinel-updater.timer
 
     if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
@@ -1157,9 +1102,6 @@ EOF
 while true; do
     MIN=\$(date -u +%M)
     HOUR=\$(date -u +%H)
-    if [ "\$MIN" == "00" ] || [ "\$MIN" == "20" ] || [ "\$MIN" == "40" ]; then
-        /bin/bash /opt/ip_sentinel/core/runner.sh >/dev/null 2>&1
-    fi
     if [ "\$HOUR" == "${DEPLOY_UTC_HOUR}" ] && [ "\$MIN" == "${DEPLOY_UTC_MIN}" ]; then
         /bin/bash /opt/ip_sentinel/core/updater.sh >/dev/null 2>&1
     fi
@@ -1187,10 +1129,6 @@ EOF
             
         else
             crontab -l 2>/dev/null | grep -v "ip_sentinel" > "${SECURE_TMP}/cron_backup" || true
-            # [引擎代管模式] 本地模块全关时不部署 20 分钟 runner 巡逻
-            if [ "$ENABLE_GOOGLE" == "true" ] || [ "$ENABLE_TRUST" == "true" ]; then
-                echo "*/20 * * * * ${INSTALL_DIR}/core/runner.sh >/dev/null 2>&1" >> "${SECURE_TMP}/cron_backup"
-            fi
             echo "${DEPLOY_UTC_MIN} ${DEPLOY_UTC_HOUR} * * * ${INSTALL_DIR}/core/updater.sh >/dev/null 2>&1" >> "${SECURE_TMP}/cron_backup"
             
             if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
