@@ -392,17 +392,52 @@ def probe_region(page):
 
 
 def region_verdict(node, region_code, probe):
-    """区域判定落盘 + 漂移/送中标记 (监控层 KPI)。"""
-    target = region_code.upper()
-    observed = probe.get("yt", "")
-    verdict = "OK"
-    if observed == "CN":
-        verdict = "SINICIZED"       # 送中告警
-    elif observed and observed != target:
-        verdict = "DRIFT"           # 区域漂移 (如酷鸭: 目标 HK 实际 US)
+    """区域判定落盘 + 漂移/送中标记 (监控层 KPI)。
 
-    log("区域自检: target=%s Jump=%s YT=%s -> %s"
-        % (target, probe.get("jump") or "unknown", observed or "unknown", verdict))
+    信号优先级:
+    - jump (google.com 落地域名): 送中 IP 会 302 至 google.com.hk —— 最直接
+      的中文区重定向信号;非目标 TLD 即视为漂移
+    - yt (YouTube contentRegion): GL 判定,作为佐证
+    """
+    target = region_code.upper()
+    jump = (probe.get("jump") or "").lower()
+    observed = probe.get("yt", "")
+
+    verdict = "OK"
+    notes = []
+
+    # 主信号: 落地域名 (google.com → google.com.hk 是中文区重定向)
+    if jump:
+        # 目标区对应的国家 TLD (US 的默认域是 google.com, 无后缀)
+        expected_domains = {
+            "US": ("www.google.com", "google.com"),
+            "HK": ("www.google.com.hk", "google.com.hk"),
+            "TW": ("www.google.com.tw", "google.com.tw"),
+            "JP": ("www.google.co.jp", "google.co.jp"),
+            "UK": ("www.google.co.uk", "google.co.uk"),
+        }
+        ok_domains = expected_domains.get(target, ())
+        if jump in ("www.google.com.hk", "google.com.hk") and "google.com.hk" not in ok_domains:
+            verdict = "SINICIZED"
+            notes.append("jump→com.hk")
+        elif ok_domains and jump not in ok_domains:
+            verdict = "DRIFT"
+            notes.append("jump→" + jump)
+        elif not ok_domains and jump not in ("www.google.com", "google.com"):
+            verdict = "DRIFT"
+            notes.append("jump→" + jump)
+
+    # 佐证: YouTube contentRegion
+    if observed == "CN":
+        verdict = "SINICIZED"
+        notes.append("yt=CN")
+    elif observed and observed != target and verdict == "OK":
+        verdict = "DRIFT"
+        notes.append("yt=" + observed)
+
+    log("区域自检: target=%s Jump=%s YT=%s -> %s%s"
+        % (target, jump or "unknown", observed or "unknown", verdict,
+           (" (" + ",".join(notes) + ")") if notes else ""))
 
     # 落盘最新判定 (供 TG 告警/趋势展示消费)
     state = {
