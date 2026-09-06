@@ -503,6 +503,17 @@ if [ "$UPGRADE_MODE" == "false" ]; then
         echo -e "\033[90m   (若您的终端较老不支持点击，请手动复制: https://blog.iot-architect.com/engineering-practice/get-telegram-personal-id-via-userinfobot/ )\033[0m"
         read -p "请输入你的 Chat ID (必须准确，否则无法联控): " RAW_CHAT_ID
         CHAT_ID=$(echo "$RAW_CHAT_ID" | tr -cd '0-9-')
+
+        # [V2 加固] Master 出口 IP：指令端口防火墙只对该来源放行 (V6 审计项落地)
+        echo -e "\n\033[36m[4.1/7] Master 司令部出口 IP 锁定 (指令端口将只对该 IP 放行)...\033[0m"
+        read -p "请输入 Master 机器的公网 IP (Master 与 Agent 同机安装则直接回车): " RAW_MASTER_IP
+        MASTER_EGRESS_IP=$(echo "$RAW_MASTER_IP" | tr -cd '0-9a-fA-F.:')
+        if [ -z "$MASTER_EGRESS_IP" ]; then
+            MASTER_EGRESS_IP="127.0.0.1"
+            echo -e "✅ \033[32m未输入——按同机单机模式处理 (仅本机可达指令端口)。\033[0m"
+        else
+            echo -e "✅ \033[32m已锁定 Master 出口: $MASTER_EGRESS_IP (指令端口仅对该来源放行)。\033[0m"
+        fi
         
         echo -e "\n\033[36m[4.2/7] 正在构建 Webhook 安全通信隧道...\033[0m"
         echo -n "🎲 正在探测可用随机端口..."
@@ -1223,60 +1234,56 @@ echo "⚙️ 哨兵现已开启 [每20分钟] 的高频高拟真养护循环。"
 if [[ -n "$TG_TOKEN" ]]; then
     echo "📡 Webhook 监听已启动 (端口: $AGENT_PORT) 并向中枢发送了注册请求。"
     
-    # [v4.2.2 防火墙修正] 适配多宿主 IP 提示
-    IS_V6_COMM="false"
-    [[ "$SAFE_COMM_IP" == *":"* ]] && IS_V6_COMM="true"
-
-    # [V2 安全修复] 询问 Master 出口 IP 用于防火墙限源 (强烈建议填写)
-    echo -e "\n\033[36m[V2 加固] 指令通道端口默认对全网开放是重大攻击面。\033[0m"
-    read -p "请输入 Master 司令部机器的公网出口 IP (用于防火墙限源，强烈建议填写；私有部署单机模式可直接回车跳过): " MASTER_EGRESS_IP
-    MASTER_EGRESS_IP=$(echo "$MASTER_EGRESS_IP" | tr -cd '0-9a-fA-F.:')
-    if [ -n "$MASTER_EGRESS_IP" ]; then
-        FW_SRC_NOTE="(限源: 仅 $MASTER_EGRESS_IP 可达)"
-    else
-        FW_SRC_NOTE="(⚠️ 未限源，全网可达——建议尽快补一条限源规则)"
+    # [V2/V6 加固] 指令端口 (9527/随机) 的防火墙放行必须限源到 Master 出口 IP，绝不对全网开放
+    # MASTER_EGRESS_IP 在凭证配置段输入；升级模式下从配置继承或回落本机
+    if [ -z "$MASTER_EGRESS_IP" ]; then
+        MASTER_EGRESS_IP=$(grep "^MASTER_EGRESS_IP=" "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f2)
+        [ -z "$MASTER_EGRESS_IP" ] && MASTER_EGRESS_IP="127.0.0.1"
     fi
+    echo "MASTER_EGRESS_IP=\"$MASTER_EGRESS_IP\"" >> "$CONFIG_FILE"
+    FW_SRC_NOTE="(已限源: 仅 Master $MASTER_EGRESS_IP 可达)"
 
-    FW_MSG=""
+    # [幂等收口] 先清除历史遗留的"全网放行"规则，再落限源规则
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -qw active; then
-        if [ -n "$MASTER_EGRESS_IP" ]; then
-            FW_MSG="ufw allow from $MASTER_EGRESS_IP to any port $AGENT_PORT proto tcp"
-        else
-            FW_MSG="ufw allow $AGENT_PORT/tcp"
-        fi
+        ufw delete allow "$AGENT_PORT"/tcp >/dev/null 2>&1 || true
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        while iptables -C INPUT -p tcp --dport "$AGENT_PORT" -j ACCEPT >/dev/null 2>&1; do
+            iptables -D INPUT -p tcp --dport "$AGENT_PORT" -j ACCEPT
+        done
+    fi
+    if command -v ip6tables >/dev/null 2>&1; then
+        while ip6tables -C INPUT -p tcp --dport "$AGENT_PORT" -j ACCEPT >/dev/null 2>&1; do
+            ip6tables -D INPUT -p tcp --dport "$AGENT_PORT" -j ACCEPT
+        done
+    fi
+
+    FW_APPLIED=""
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -qw active; then
+        ufw allow from "$MASTER_EGRESS_IP" to any port "$AGENT_PORT" proto tcp >/dev/null 2>&1 && FW_APPLIED="ufw"
     elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld | grep -qw active; then
-        if [ -n "$MASTER_EGRESS_IP" ]; then
-            FW_MSG="firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=\"$MASTER_EGRESS_IP\" port port=\"$AGENT_PORT\" protocol=\"tcp\" accept' && firewall-cmd --reload"
-        else
-            FW_MSG="firewall-cmd --zone=public --add-port=$AGENT_PORT/tcp --permanent && firewall-cmd --reload"
-        fi
+        firewall-cmd --quiet --permanent --add-rich-rule="rule family=ipv4 source address=\"$MASTER_EGRESS_IP\" port port=\"$AGENT_PORT\" protocol=\"tcp\" accept" 2>/dev/null \
+            && firewall-cmd --quiet --reload 2>/dev/null && FW_APPLIED="firewalld"
     elif command -v iptables >/dev/null 2>&1; then
-        if [ "$IS_V6_COMM" == "true" ]; then
-            if command -v ip6tables >/dev/null 2>&1; then
-                if [ -n "$MASTER_EGRESS_IP" ]; then
-                    FW_MSG="ip6tables -I INPUT -p tcp -s $MASTER_EGRESS_IP --dport $AGENT_PORT -j ACCEPT"
-                else
-                    FW_MSG="ip6tables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT"
-                fi
-            else
-                FW_MSG="iptables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT  # 提示: 系统缺失 ip6tables"
-            fi
+        # [同机自环模式] 若 Master 就在本机 (127.0.0.1)，用回环放行即可
+        if [ "$MASTER_EGRESS_IP" == "127.0.0.1" ]; then
+            iptables -I INPUT -p tcp -s 127.0.0.1 --dport "$AGENT_PORT" -j ACCEPT 2>/dev/null && FW_APPLIED="iptables"
+            ip6tables -I INPUT -p tcp -s ::1 --dport "$AGENT_PORT" -j ACCEPT 2>/dev/null || true
+        elif [[ "$MASTER_EGRESS_IP" == *":"* ]]; then
+            ip6tables -I INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$AGENT_PORT" -j ACCEPT 2>/dev/null && FW_APPLIED="ip6tables"
         else
-            if [ -n "$MASTER_EGRESS_IP" ]; then
-                FW_MSG="iptables -I INPUT -p tcp -s $MASTER_EGRESS_IP --dport $AGENT_PORT -j ACCEPT"
-            else
-                FW_MSG="iptables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT"
-            fi
+            iptables -I INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$AGENT_PORT" -j ACCEPT 2>/dev/null && FW_APPLIED="iptables"
         fi
     fi
-    
-    echo -e "\n\033[31m⚠️ 【高危警告】您的节点通讯寻址池已锁定为: $SAFE_COMM_IP\033[0m"
-    echo -e "\033[33m为确保 Master 司令部能够成功下发指令，您【必须】前往云服务商 (如 AWS/Oracle/阿里云 等) 的网页控制台中，将安全组 (Security Group) 防火墙的 TCP $AGENT_PORT 端口彻底放行！\033[0m"
-    echo -e "\033[31m⛔ 本系统已开启全域双栈监听，禁止尝试通过修改脚本强行绑定局域网 IP 来绕过通信阻断！\033[0m\n"
-    if [ -n "$FW_MSG" ]; then
-        echo "💡 检测到本地系统防火墙开启，您可以尝试执行以下命令放行本机端口 $FW_SRC_NOTE (注意: 云端安全组仍需您手动放行)："
-        echo -e "\033[36m   $FW_MSG\033[0m"
+
+    if [ -n "$FW_APPLIED" ]; then
+        echo -e "🛡️ \033[32m已自动落地防火墙限源规则 ($FW_APPLIED)：仅 $MASTER_EGRESS_IP 可访问指令端口 $AGENT_PORT。\033[0m"
+    else
+        echo -e "🛡️ \033[33m本机防火墙工具不可用，请手动确保云端安全组仅对 $MASTER_EGRESS_IP 放行 TCP $AGENT_PORT (严禁 0.0.0.0/0)！\033[0m"
     fi
+
+    echo -e "\n\033[31m⚠️ 【通信锁定】指令端口 $AGENT_PORT 已限源 Master ($MASTER_EGRESS_IP)；云服务商安全组请同样仅放行该来源！\033[0m"
+    echo -e "\033[31m⛔ 本系统已开启全域双栈监听，禁止尝试通过修改脚本强行绑定局域网 IP 来绕过通信阻断！\033[0m\n"
 fi
 echo "🗑️ 若未来需卸载，可重新运行本脚本选择[2]或执行: bash ${INSTALL_DIR}/core/uninstall.sh"
 echo "========================================================"

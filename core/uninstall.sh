@@ -94,12 +94,17 @@ fi
 echo "[4/5] 正在执行本地防火墙撤防操作..."
 if [ -f "$CONFIG_FILE" ]; then
     AGENT_PORT=$(grep "^AGENT_PORT=" "$CONFIG_FILE" | cut -d'"' -f2)
+    MASTER_EGRESS_IP=$(grep "^MASTER_EGRESS_IP=" "$CONFIG_FILE" | cut -d'"' -f2)
     if [ -n "$AGENT_PORT" ]; then
         if command -v ufw >/dev/null 2>&1 && ufw status | grep -qw active; then
             ufw delete allow "$AGENT_PORT"/tcp >/dev/null 2>&1
+            # [V2 配套] 清除限源放行规则
+            [ -n "$MASTER_EGRESS_IP" ] && ufw delete allow from "$MASTER_EGRESS_IP" to any port "$AGENT_PORT" proto tcp >/dev/null 2>&1
             echo -e " ✅ \033[32mUFW 防火墙双栈撤防成功 (剔除端口: $AGENT_PORT)。\033[0m"
         elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld | grep -qw active; then
             firewall-cmd --zone=public --remove-port="$AGENT_PORT"/tcp --permanent >/dev/null 2>&1
+            # [V2 配套] 清除限源 rich rule
+            [ -n "$MASTER_EGRESS_IP" ] && firewall-cmd --permanent --remove-rich-rule="rule family=ipv4 source address=\"$MASTER_EGRESS_IP\" port port=\"$AGENT_PORT\" protocol=\"tcp\" accept" >/dev/null 2>&1
             firewall-cmd --reload >/dev/null 2>&1
             echo -e " ✅ \033[32mFirewalld 持久化拦截规则回缩完毕。\033[0m"
         else
@@ -110,12 +115,25 @@ if [ -f "$CONFIG_FILE" ]; then
                     iptables -D INPUT -p tcp --dport "$AGENT_PORT" -j ACCEPT
                     fw_removed=true
                 done
+                # [V2 配套] 清除限源放行规则
+                if [ -n "$MASTER_EGRESS_IP" ]; then
+                    while iptables -C INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$AGENT_PORT" -j ACCEPT >/dev/null 2>&1; do
+                        iptables -D INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$AGENT_PORT" -j ACCEPT
+                        fw_removed=true
+                    done
+                fi
             fi
             if command -v ip6tables >/dev/null 2>&1; then
                 while ip6tables -C INPUT -p tcp --dport "$AGENT_PORT" -j ACCEPT >/dev/null 2>&1; do
                     ip6tables -D INPUT -p tcp --dport "$AGENT_PORT" -j ACCEPT
                     fw_removed=true
                 done
+                if [ -n "$MASTER_EGRESS_IP" ]; then
+                    while ip6tables -C INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$AGENT_PORT" -j ACCEPT >/dev/null 2>&1; do
+                        ip6tables -D INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$AGENT_PORT" -j ACCEPT
+                        fw_removed=true
+                    done
+                fi
             fi
             
             if [ "$fw_removed" = true ]; then
