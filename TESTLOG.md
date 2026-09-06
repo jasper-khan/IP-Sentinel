@@ -47,7 +47,10 @@ webhook.py 隔离实验台 (fcntl shim + 测试 config):
 - [x] Agent 同机安装: config 13 字段齐(PSK 64hex/US-LA persona/MASTER_EGRESS_IP=127.0.0.1)/探针 vendor 落地/runner 不部署(引擎代管)
 - [x] 修复 bug 4: scheduler active_sessions 多行崩溃 (pgrep -fc 空输出) → 已修+重部署
 - [x] 发现环境冲突: cloudnium 旧机原版 Master 抢占同 token getUpdates (409) → 已停旧机服务
-- [~] 注册入库: 首次注册被旧 Master 吞掉;已重推注册消息(message 1797)等用户转发给 bot
+- [x] 注册入库: 13 字段全验(PSK 64hex/persona US-LA/双栈地址/ssh_port/tunnel_user);旧 Master 吞掉的首注册由人工转发补回
+- [x] **指令链 E2E 全过**: PSK签名指令执行(Action Accepted)/错误PSK 401/重放401/TOFU锁定+不匹配检测/时间窗外401
+- [x] **防火墙限源实测**: 公网 IP 被拦(限源生效),127.0.0.1 放行
+- [~] Camoufox 会话 + 指纹持久化 (运行中)
 
 ### Agent 安装明细验证
 - config: AGENT_VERSION=5.2.1, REGION=US-LA, AGENT_PORT=36357, NODE_ALIAS=L-test
