@@ -33,12 +33,18 @@ webhook.py 隔离实验台 (fcntl shim + 测试 config):
 
 发布流程固化: bump version → commit → gen_manifest → commit 清单 → tag
 
-## 测试方法学教训
+## 测试中修复的 bug 累计 (6 个)
 
-- tmux+tee 跑安装器假死 (wait_woken, 无子进程) → **printf 管道喂 stdin + nohup 才可靠**
-- 二次安装会走"平滑升级"分支 source 旧 conf → 测试必须先抹干净 /opt/ip_sentinel_master
-- termark heredoc 首行 BOM → 本地写脚本文件再 upload
-- raw.githubusercontent CDN 缓存 version.txt (显示 v5.1.1) 无碍: 组件按 main 拉且过哈希门禁
+| # | Bug | 根因 | 版本 |
+|---|-----|------|------|
+| 1 | manifest 星号 | Git-Bash sha256sum 标记 | v5.1.1 |
+| 2 | manifest CRLF | 工作区哈希 ≠ git blob | v5.2.0 |
+| 3 | venv 缺失 | Debian 无 python3-venv | v5.2.1 |
+| 4 | scheduler 崩溃 | pgrep -fc 空输出双行 | v5.2.x hot |
+| 5 | 会话 FATAL: unexpected 'timezone' | Camoufox 构造无此参;须并入 config | v5.3.0 |
+| 6 | 同机节点误建隧道 | 双栈注册串非 127.0.0.1 字面量 | v5.3.0 |
+
+另修: geolocation 元组→dict;locale 补 region 修 LeakWarning
 
 ## 阶段 4: E2E 安装
 
