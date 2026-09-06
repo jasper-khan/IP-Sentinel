@@ -394,10 +394,10 @@ def probe_region(page):
 def region_verdict(node, region_code, probe):
     """区域判定落盘 + 漂移/送中标记 (监控层 KPI)。
 
-    信号优先级:
-    - jump (google.com 落地域名): 送中 IP 会 302 至 google.com.hk —— 最直接
-      的中文区重定向信号;非目标 TLD 即视为漂移
-    - yt (YouTube contentRegion): GL 判定,作为佐证
+    证据分级 (避免单信号定罪 — 实测曾因孤立 jump 样本误报送中):
+    - 两信号一致 → 定罪 (SINICIZED / DRIFT)
+    - 仅单信号矛盾且另一信号支持目标 → WATCH (观察,待复现)
+    - yt=CN 与 jump→com.hk 互为强证据,任一与目标冲突即升级
     """
     target = region_code.upper()
     jump = (probe.get("jump") or "").lower()
@@ -406,9 +406,10 @@ def region_verdict(node, region_code, probe):
     verdict = "OK"
     notes = []
 
-    # 主信号: 落地域名 (google.com → google.com.hk 是中文区重定向)
+    # 信号 1: 落地域名 (google.com → google.com.hk 是中文区重定向)
+    jump_bad = False       # jump 与目标矛盾
+    jump_sinic = False     # jump 指向中文区
     if jump:
-        # 目标区对应的国家 TLD (US 的默认域是 google.com, 无后缀)
         expected_domains = {
             "US": ("www.google.com", "google.com"),
             "HK": ("www.google.com.hk", "google.com.hk"),
@@ -418,22 +419,40 @@ def region_verdict(node, region_code, probe):
         }
         ok_domains = expected_domains.get(target, ())
         if jump in ("www.google.com.hk", "google.com.hk") and "google.com.hk" not in ok_domains:
-            verdict = "SINICIZED"
+            jump_sinic = True
             notes.append("jump→com.hk")
         elif ok_domains and jump not in ok_domains:
-            verdict = "DRIFT"
+            jump_bad = True
             notes.append("jump→" + jump)
         elif not ok_domains and jump not in ("www.google.com", "google.com"):
-            verdict = "DRIFT"
+            jump_bad = True
             notes.append("jump→" + jump)
 
-    # 佐证: YouTube contentRegion
+    # 信号 2: YouTube contentRegion
+    yt_bad = False
+    yt_sinic = False
     if observed == "CN":
-        verdict = "SINICIZED"
+        yt_sinic = True
         notes.append("yt=CN")
-    elif observed and observed != target and verdict == "OK":
-        verdict = "DRIFT"
+    elif observed and observed != target:
+        yt_bad = True
         notes.append("yt=" + observed)
+
+    # 证据合成
+    # - yt=CN: 最强单信号,YouTube 明确判 CN → 直接定罪
+    # - jump→中文区: yt 佐证漂移→定罪; yt 支持目标或未测→观察
+    # - 双信号一致漂移 → DRIFT (酷鸭: jump=US yt=US 目标 HK)
+    # - 单信号漂移且另一信号缺失/支持目标 → WATCH
+    if yt_sinic:
+        verdict = "SINICIZED"
+    elif jump_sinic:
+        verdict = "SINICIZED" if yt_bad else "WATCH"
+    elif jump_bad and yt_bad:
+        verdict = "DRIFT"
+    elif jump_bad:
+        verdict = "WATCH" if (not observed or observed == target) else "DRIFT"
+    elif yt_bad:
+        verdict = "DRIFT" if jump else "WATCH"
 
     log("区域自检: target=%s Jump=%s YT=%s -> %s%s"
         % (target, jump or "unknown", observed or "unknown", verdict,
