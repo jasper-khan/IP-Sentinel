@@ -60,7 +60,15 @@ webhook.py 隔离实验台 (fcntl shim + 测试 config):
 - [x] **卸载验收全过**: 服务/目录/UFW规则(含限源)/tunnel用户 零残留
 - [x] 修复 bug 7: engine_setup 补浏览器系统依赖 (Debian12 无 libgtk-3 → XPCOMGlueLoad 失败)
 - [x] 修复 bug 8: 区域自检判定纳入 jump 落地域主信号 (002 实测 jump=com.hk 被误判 OK);7 用例单测全过
-- [~] 指纹复用双会话验证 (运行中)
+- [x] **指纹复用双会话验证 PASS**: 两次完整会话 fingerprint+seeds 哈希完全一致 (一个 IP = 一套固定设备身份)
+- [x] **最终验收 11/11**: 三服务+agent-daemon active/runner 不存在/DB PSK/指纹三件套/.region/探针 vendor/UFW 限源(31043 ALLOW 127.0.0.1)
+- [x] 区域自检判定升级为证据分级 (WATCH 观察级),13 用例单测全过
+
+## 测试结论: 全部通过
+
+v5.3.2-fork 在 cloudnium002 完成 功能/回归/验收/端到端 四层测试。
+测试过程抓出并修复 9 个 bug (含发布流程 2、依赖 2、运行时 4、判定 1),
+1 次误报更正 (002 送中 → 实为单样本噪声)。系统现作为测试中枢持续运行。
 
 ## 观察项 (原误报为"轻送中",已更正)
 
