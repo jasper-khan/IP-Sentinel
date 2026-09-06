@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import time
 from urllib.parse import urlparse
@@ -208,6 +209,10 @@ def run_session(node, region_code, socks_port, persona, keywords):
                 except Exception as e:
                     log("WARN 动作[%d] %s 失败: %s" % (i, url, e))
 
+        # --- 动作 5: 会话尾区域自检 (三核探测 + 漂移/送中落盘) ---
+        probe = probe_region(page)
+        region_verdict(node, region_code, probe)
+
         try:
             page.close()
         except Exception:
@@ -230,6 +235,58 @@ def _human_scroll(page, steps=None):
             time.sleep(random.uniform(0.4, 1.8))
     except Exception:
         pass
+
+
+def probe_region(page):
+    """三核区域探测 (移植自 mod_google 自检):
+    - jump: google.com 落地的最终域名 (被送中 IP 会 302 到 google.com.hk)
+    - yt:   YouTube Premium 页面暴露的 contentRegion/GL
+    """
+    result = {"jump": "", "yt": ""}
+    try:
+        page.goto("https://www.google.com/", wait_until="domcontentloaded")
+        time.sleep(random.randint(2, 6))
+        result["jump"] = urlparse(page.url).netloc
+    except Exception:
+        pass
+    try:
+        page.goto("https://www.youtube.com/premium", wait_until="domcontentloaded")
+        time.sleep(random.randint(2, 5))
+        m = re.search(r'"(?:contentRegion|countryCode|GL)":"([A-Za-z]{2})"', page.content())
+        if m:
+            result["yt"] = m.group(2).upper()
+    except Exception:
+        pass
+    return result
+
+
+def region_verdict(node, region_code, probe):
+    """区域判定落盘 + 漂移/送中标记 (监控层 KPI)。"""
+    target = region_code.upper()
+    observed = probe.get("yt", "")
+    verdict = "OK"
+    if observed == "CN":
+        verdict = "SINICIZED"       # 送中告警
+    elif observed and observed != target:
+        verdict = "DRIFT"           # 区域漂移 (如酷鸭: 目标 HK 实际 US)
+
+    log("区域自检: target=%s Jump=%s YT=%s -> %s"
+        % (target, probe.get("jump") or "unknown", observed or "unknown", verdict))
+
+    # 落盘最新判定 (供 TG 告警/趋势展示消费)
+    state = {
+        "target": target,
+        "jump": probe.get("jump"),
+        "yt": observed,
+        "verdict": verdict,
+        "ts": int(time.time()),
+    }
+    try:
+        with open(os.path.join(PROFILE_ROOT, "%s.region" % node), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+    return verdict
 
 
 def main():

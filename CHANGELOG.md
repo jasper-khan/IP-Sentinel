@@ -1,5 +1,11 @@
 # Changelog
 
+## [v4.5.2-fork] - 2026-09-06
+
+### ✨ Features
+
+- **引擎区域自检 (移植 mod_google 三核验证)** — 每次会话尾部探测实际区域: google.com 落地域名 (送中 IP 会 302 至 google.com.hk) + YouTube contentRegion;判定 OK / DRIFT (漂移) / SINICIZED (送中) 落盘 `<node>.region`,供告警与趋势消费
+
 ## [v4.5.1-fork] - 2026-09-06
 
 ### ✨ Features
