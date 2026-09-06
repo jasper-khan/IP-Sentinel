@@ -30,10 +30,30 @@ TARGET_VERSION=${TARGET_VERSION:-"4.3.1"}
 
 echo -e "\n⏳ 正在拉取 IP-Sentinel Master v${TARGET_VERSION} 安装引擎..."
 
+# ----------------------------------------------------------
+# [V3 安全修复] 供应链完整性门禁 (与 Agent 引导入口同构)
+# ----------------------------------------------------------
+curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/MANIFEST.sha256?t=$(date +%s)" -o "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null
+
+if [ -s "${SECURE_TMP}/MANIFEST.sha256" ]; then
+    MANIFEST_EXPECTED=$(awk '$2 == "install/build_master.sh" {print $1}' "${SECURE_TMP}/MANIFEST.sha256")
+fi
+
 curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/install/build_master.sh?t=$(date +%s)" -o "${SECURE_TMP}/build_master.sh"
 
 if [ ! -s "${SECURE_TMP}/build_master.sh" ]; then
     echo -e "\033[31m❌ 致命错误：中枢安装引擎拉取失败！\033[0m"
+    exit 1
+fi
+
+# [完整性熔断] 无清单或哈希不匹配 → 拒绝执行
+MANIFEST_ACTUAL=$(sha256sum "${SECURE_TMP}/build_master.sh" | awk '{print $1}')
+if [ -z "$MANIFEST_EXPECTED" ] || [ "$MANIFEST_EXPECTED" != "$MANIFEST_ACTUAL" ]; then
+    echo -e "\033[31m❌ 供应链熔断：安装引擎哈希与 MANIFEST.sha256 不符 (或清单缺失)。已拒绝执行。\033[0m"
+    exit 1
+fi
+if ! bash -n "${SECURE_TMP}/build_master.sh"; then
+    echo -e "\033[31m❌ 安装引擎语法校验失败，疑似下载截断。已拒绝执行。\033[0m"
     exit 1
 fi
 

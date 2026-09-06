@@ -492,7 +492,9 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"Action Accepted: trigger_ota\n")
                 
-                # [防线/容灾] 逃逸 Cgroup 隔离沙盒，并引入前置脚本语法校验防砖
+                # [V3 安全修复] OTA 拉取锁定到仓库 MANIFEST (tag/commit 固定)，
+                # install.sh 落地前先与 MANIFEST 中记录的 SHA-256 强比对，
+                # 不匹配即熔断——bash -n 仅作为附加防截断检查
                 import shutil
                 import base64
                 repo_url = "https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
@@ -502,26 +504,34 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
                             if line.startswith('REPO_RAW_URL='):
                                 repo_url = line.split('=', 1)[1].strip('"\'')
                                 break
-                
-                err_msg = f"❌ **OTA 熔断告警**\n📍 节点: `{config_mem.get('NODE_ALIAS', '未知')}`\n⚠️ 原因: 脚本语法校验(bash -n)未通过，下载可能不完整。\n🚀 状态: 升级已取消，节点安全。"
+
+                err_msg = f"❌ **OTA 熔断告警**\n📍 节点: `{config_mem.get('NODE_ALIAS', '未知')}`\n⚠️ 原因: 下载内容与仓库 MANIFEST 锁定哈希不符或脚本语法校验未通过。\n🚀 状态: 升级已取消，节点安全。"
                 err_msg_b64 = base64.b64encode(err_msg.encode('utf-8')).decode('utf-8')
-                
+
                 tg_url = config_mem.get('TG_API_URL', '')
                 chat_id = config_mem.get('CHAT_ID', '')
-                
+
                 # 将升级逻辑进行 Base64 深层封装，免疫 Popen 或 Systemd 传递带来的指令注入风险
                 ota_script = f"""
 export SILENT_OTA="true"
 OTA_TMP=$(mktemp /tmp/ips_ota.XXXXXX.sh)
+MANIFEST_TMP=$(mktemp /tmp/ips_ota_manifest.XXXXXX)
+curl -fsSL {repo_url}/MANIFEST.sha256 -o "$MANIFEST_TMP" || MANIFEST_TMP=""
+if [ -z "$MANIFEST_TMP" ]; then
+    echo "OTA Aborted: MANIFEST.sha256 unavailable" > /opt/ip_sentinel/logs/ota_upgrade.log
+    exit 0
+fi
 curl -fsSL {repo_url}/core/install.sh -o "$OTA_TMP"
-if bash -n "$OTA_TMP"; then
-    bash "$OTA_TMP" > /opt/ip_sentinel/logs/ota_upgrade.log 2>&1
-else
+EXPECTED=$(awk '$2 == "core/install.sh" {{print $1}}' "$MANIFEST_TMP")
+ACTUAL=$(sha256sum "$OTA_TMP" | awk '{{print $1}}')
+if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$OTA_TMP"; then
     MSG=$(echo '{err_msg_b64}' | base64 -d)
     curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" -d "text=$MSG" -d "parse_mode=Markdown" > /dev/null 2>&1
-    echo "OTA Checksum Failed: Script corrupted" > /opt/ip_sentinel/logs/ota_upgrade.log
+    echo "OTA Integrity Failed: manifest mismatch" > /opt/ip_sentinel/logs/ota_upgrade.log
+else
+    bash "$OTA_TMP" > /opt/ip_sentinel/logs/ota_upgrade.log 2>&1
 fi
-rm -f "$OTA_TMP"
+rm -f "$OTA_TMP" "$MANIFEST_TMP"
 """
                 ota_script_b64 = base64.b64encode(ota_script.encode('utf-8')).decode('utf-8')
                 
