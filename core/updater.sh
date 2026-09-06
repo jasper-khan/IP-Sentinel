@@ -116,19 +116,20 @@ if [ -n "$REGION_JSON_FILE" ] && [ -f "$REGION_JSON_FILE" ]; then
 fi
 
 # ==========================================================
-# [容灾校验] 外置供应链投毒防线与底层签名嗅探
+# [供应链防线] 探针 (ip.sh) 已 vendor 进仓库并锁定 SHA-256，
+# 仅随仓库受控发布整体更新，不参与每日热数据同步。
+# 运行时校验由 mod_quality.sh 的完整性门禁执行。
 # ==========================================================
-TMP_PROBE="/tmp/ip_sentinel_probe.sh"
-$CURL_CMD "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh" -o "$TMP_PROBE"
-
-# 严格过滤无标识或 HTML 劫持阻断页面，免疫上游源的降级攻击
-if [ -s "$TMP_PROBE" ] && grep -q "xykt" "$TMP_PROBE" 2>/dev/null; then
-    mv "$TMP_PROBE" "${INSTALL_DIR}/core/ip_probe.sh"
-    chmod +x "${INSTALL_DIR}/core/ip_probe.sh"
-    log "Updater" "INFO " "✅ 深海声呐底层探针 (ip_probe.sh) 源文件安全对齐"
+PROBE_SCRIPT="${INSTALL_DIR}/data/probe/ip.sh"
+PROBE_SHA_FILE="${INSTALL_DIR}/data/probe/ip.sh.sha256"
+if [ -s "$PROBE_SCRIPT" ] && [ -s "$PROBE_SHA_FILE" ]; then
+    EXPECTED_PROBE_SHA=$(tr -d '[:space:]' < "$PROBE_SHA_FILE")
+    ACTUAL_PROBE_SHA=$(sha256sum "$PROBE_SCRIPT" 2>/dev/null | awk '{print $1}')
+    if [ -n "$EXPECTED_PROBE_SHA" ] && [ "$EXPECTED_PROBE_SHA" != "$ACTUAL_PROBE_SHA" ]; then
+        log "Updater" "WARN " "❌ 本地探针哈希与锁定值不符 (疑遭篡改)，请重新安装修复！"
+    fi
 else
-    log "Updater" "WARN " "❌ 探针源文件拉取受损或遭投毒劫持，已触发防砖机制，保留本地旧版本"
-    rm -f "$TMP_PROBE" 2>/dev/null
+    log "Updater" "WARN " "❌ 本地探针或哈希清单缺失，质量探测将中止，请重新安装修复！"
 fi
 
 # ==========================================================

@@ -873,6 +873,29 @@ rm -rf "${INSTALL_DIR}/core" 2>/dev/null
 mv "$TMP_CORE" "${INSTALL_DIR}/core"
 chmod +x ${INSTALL_DIR}/core/*.sh
 
+# ==========================================================
+# [供应链防线] 部署 vendored 探针 + SHA-256 锁定清单
+# 探针随仓库发布整体更新，安装后任何组件不得运行时拉取第三方脚本
+# ==========================================================
+mkdir -p "${INSTALL_DIR}/data/probe"
+curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/probe/ip.sh" -o "${INSTALL_DIR}/data/probe/ip.sh"
+curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/probe/ip.sh.sha256" -o "${INSTALL_DIR}/data/probe/ip.sh.sha256"
+chmod 644 "${INSTALL_DIR}/data/probe/ip.sh" "${INSTALL_DIR}/data/probe/ip.sh.sha256"
+
+# [落盘门禁] 探针哈希比对失败 = 拉取被劫持，熔断安装
+if [ -s "${INSTALL_DIR}/data/probe/ip.sh" ] && [ -s "${INSTALL_DIR}/data/probe/ip.sh.sha256" ]; then
+    INSTALL_PROBE_SHA=$(sha256sum "${INSTALL_DIR}/data/probe/ip.sh" | awk '{print $1}')
+    INSTALL_EXPECT_SHA=$(tr -d '[:space:]' < "${INSTALL_DIR}/data/probe/ip.sh.sha256")
+    if [ -z "$INSTALL_EXPECT_SHA" ] || [ "$INSTALL_PROBE_SHA" != "$INSTALL_EXPECT_SHA" ]; then
+        echo -e "\033[31m❌ 致命错误：探针完整性校验失败 (下载内容与锁定哈希不符)！\033[0m"
+        echo "🛡️ 防砖机制触发：已中止安装。"
+        exit 1
+    fi
+else
+    echo -e "\033[31m❌ 致命错误：探针或哈希清单拉取失败！\033[0m"
+    exit 1
+fi
+
 curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/user_agents.txt" -o "${INSTALL_DIR}/data/user_agents.txt"
 if [ "$UPGRADE_MODE" == "false" ]; then
     curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/keywords/${KEYWORD_FILE}" -o "${INSTALL_DIR}/data/keywords/${KEYWORD_FILE}"

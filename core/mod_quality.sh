@@ -34,25 +34,36 @@ fi
 PROBE_ARGS+=("-${DYNAMIC_IP_PREF}")
 
 # ----------------------------------------------------------
-# 2. 智能拉取引擎 (防 RCE 与 文件防伪校验)
+# 2. 探针完整性门控 (供应链防线)
+# 探针已 vendor 进本仓库随安装落地，运行前强制 SHA-256 校验；
+# 校验失败一律中止探测，绝不执行未验证内容。
+# [安全策略] 不存在任何运行时第三方下载路径。
 # ----------------------------------------------------------
-PROBE_SCRIPT="/opt/ip_sentinel/core/ip_probe.sh"
+PROBE_SCRIPT="/opt/ip_sentinel/data/probe/ip.sh"
+PROBE_SHA_FILE="/opt/ip_sentinel/data/probe/ip.sh.sha256"
 
-# [完整性校验] 验证本地残留脚本是否损坏 (防止因被墙或拦截导致本地缓存了无效的 HTML 报错页)
-if [ -f "$PROBE_SCRIPT" ] && ! grep -q "xykt" "$PROBE_SCRIPT" 2>/dev/null; then
-    rm -f "$PROBE_SCRIPT"
-fi
-
-if [ ! -s "$PROBE_SCRIPT" ]; then
-    # [首选防线] 严格遵守从官方主干拉取，捍卫纯净底线
-    curl -sL -m 10 "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh" -o "$PROBE_SCRIPT" 2>/dev/null
-    
-    # [文件防伪校验] 剔除因解析失效返回的污染文本，并降级至双栈 CDN 节点兜底
-    if ! grep -q "xykt" "$PROBE_SCRIPT" 2>/dev/null; then
-        rm -f "$PROBE_SCRIPT" 2>/dev/null
-        curl -sL -m 15 "https://IP.Check.Place" -o "$PROBE_SCRIPT" 2>/dev/null
+probe_verify() {
+    # [门禁 1] 文件与哈希清单必须同时存在
+    if [ ! -s "$PROBE_SCRIPT" ] || [ ! -s "$PROBE_SHA_FILE" ]; then
+        return 1
     fi
-    chmod +x "$PROBE_SCRIPT" 2>/dev/null
+    # [门禁 2] SHA-256 精确比对 (哈希值仅可随受控发布更新，不接受运行时注入)
+    local expected actual
+    expected=$(tr -d '[:space:]' < "$PROBE_SHA_FILE")
+    actual=$(sha256sum "$PROBE_SCRIPT" 2>/dev/null | awk '{print $1}')
+    [ -n "$expected" ] && [ "$expected" = "$actual" ]
+}
+
+if ! probe_verify; then
+    # [熔断] 校验失败 → 跳过本轮探测并告警，保持本地文件不动以供排查
+    curl -s -X POST "${TG_API_URL}" \
+        -d "chat_id=${CHAT_ID}" \
+        -d "parse_mode=Markdown" \
+        -d "text=🚨 *深海声呐探针完整性校验失败*
+📍 节点：\`${NODE_ALIAS}\`
+⚠️ *ip.sh 与锁定哈希不符或缺失，本轮探测已中止。*
+🔗 探针仅随仓库发布更新，请重新执行安装以修复。" >/dev/null
+    exit 1
 fi
 
 # ==========================================================
