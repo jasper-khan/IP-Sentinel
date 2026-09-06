@@ -35,7 +35,10 @@ PATHS=(
 : > "$MANIFEST"
 for f in "${PATHS[@]}"; do
     if [ -f "$f" ]; then
-        sha256sum "$f" >> "$MANIFEST"
+        # -t 强制文本模式: sha256sum 在部分平台 (Git-Bash/Windows) 对文本文件
+        # 输出 '*' 二进制标记,导致 Linux 侧 awk $2 == "path" 匹配失败;
+        # 统一剥除星号保证清单跨平台一致
+        sha256sum "$f" | sed 's/^\([0-9a-f]\{64\}\) \*/\1  /' >> "$MANIFEST"
     else
         echo "WARN: $f missing, skipped" >&2
     fi

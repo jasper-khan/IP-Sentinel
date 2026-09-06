@@ -1,0 +1,601 @@
+import http.server
+import socketserver
+import subprocess
+import sys
+import os
+import html
+import urllib.parse
+import urllib.request
+import urllib.error
+import json
+import base64
+import re
+import fcntl
+import hmac
+import hashlib
+import time
+
+PORT = int(sys.argv[1])
+
+# ----------------------------------------------------------
+# [防御矩阵] Nonce 缓存池防重放攻击 (Replay Attack)
+# ----------------------------------------------------------
+USED_SIGNS = {}
+def clean_used_signs():
+    now = time.time()
+    # [安全策略] 滑动清理超 65 秒过期签名，保障内存健康
+    expired = [s for s, t in USED_SIGNS.items() if now - t > 65]
+    for s in expired:
+        del USED_SIGNS[s]
+
+# [权限鉴权 V2 修复] 每节点独立高熵 PSK (256-bit) 作为 HMAC 预共享密钥
+# 绝不回退到低熵/半公开的 chat_id；PSK 缺失或畸形时拒绝监听
+AUTH_TOKEN = ""
+if os.path.exists('/opt/ip_sentinel/config.conf'):
+    with open('/opt/ip_sentinel/config.conf', 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('NODE_PSK='):
+                AUTH_TOKEN = line.split('=', 1)[1].strip('"\'')
+                break
+
+if not re.fullmatch(r'[0-9a-fA-F]{64}', AUTH_TOKEN or ''):
+    print("FATAL: NODE_PSK missing or malformed (expect 64 hex chars). Refusing to listen.")
+    sys.exit(1)
+
+# ----------------------------------------------------------
+# [V2 加固] 鉴权失败在线限速 (抗 PSK 爆破)：单 IP 60s 内 5 次失败 → 封禁 300s
+# ----------------------------------------------------------
+AUTH_FAILS = {}
+AUTH_BAN = {}
+
+def is_banned(ip):
+    until = AUTH_BAN.get(ip, 0)
+    now = time.time()
+    if now < until:
+        return True
+    AUTH_BAN.pop(ip, None)
+    return False
+
+def record_auth_fail(ip):
+    now = time.time()
+    fails = [t for t in AUTH_FAILS.get(ip, []) if now - t < 60]
+    fails.append(now)
+    AUTH_FAILS[ip] = fails
+    if len(fails) >= 5:
+        AUTH_BAN[ip] = now + 300
+        AUTH_FAILS[ip] = []
+
+class AgentHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        # [V2 加固] 封禁期内直接拒绝 (不区分原因，不给预言机)
+        client_ip = self.client_address[0]
+        if is_banned(client_ip):
+            try:
+                self.send_response(429)
+                self.end_headers()
+            except Exception:
+                pass
+            return
+
+        # [权限校验] 路径解析与 HMAC-SHA256 动态签名核验
+        parsed = urllib.parse.urlparse(self.path)
+        req_path = parsed.path
+
+        if AUTH_TOKEN:
+            query = urllib.parse.parse_qs(parsed.query)
+            req_t = query.get('t', [''])[0]
+            req_sign = query.get('sign', [''])[0]
+
+            if not req_t or not req_sign:
+                record_auth_fail(client_ip)
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b"401 Unauthorized\n")
+                return
+
+            try:
+                current_time = int(time.time())
+                # [防重放 1] 校验时间戳防偏离 (±60秒窗口，免疫隔夜抓包重放)
+                if abs(current_time - int(req_t)) > 60:
+                    record_auth_fail(client_ip)
+                    self.send_response(401)
+                    self.end_headers()
+                    self.wfile.write(b"401 Unauthorized\n")
+                    return
+            except ValueError:
+                record_auth_fail(client_ip)
+                self.send_response(401)
+                self.end_headers()
+                return
+
+            # [防重放 2] Nonce 精确核对 (拦截 60 秒内的 MITM 并发重放洗劫)
+            clean_used_signs()
+            if req_sign in USED_SIGNS:
+                record_auth_fail(client_ip)
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b"401 Unauthorized\n")
+                return
+                
+            # ==========================================================
+            # [安全升级] 漏洞 #108 修复：HMAC 覆盖完整查询参数防篡改
+            # ==========================================================
+            extra_payload = req_path
+            
+            # 精确还原 Master 下发时的 Query 参数拼接序列
+            if 'mod' in query and 'state' in query:
+                extra_payload += f"?mod={query['mod'][0]}&state={query['state'][0]}"
+            elif 'b64' in query:
+                extra_payload += f"?b64={query['b64'][0]}"
+                
+            msg = f"{extra_payload}:{req_t}".encode('utf-8')
+            expected_sign = hmac.new(AUTH_TOKEN.encode('utf-8'), msg, hashlib.sha256).hexdigest()
+
+            # [V2 加固] 失败响应与其它 401 完全同文，不给攻击者可区分的爆破预言机
+            if not hmac.compare_digest(expected_sign, req_sign):
+                record_auth_fail(client_ip)
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b"401 Unauthorized\n")
+                return
+            
+            # 鉴权通过，登记 Nonce 载荷
+            USED_SIGNS[req_sign] = current_time
+
+        # ==========================================================
+        # [指令分发] 模块级业务路由矩阵 (精确匹配策略)
+        # 注: 本地 curl 养护引擎 (runner/mod_google/mod_trust) 已移除,
+        #     养护由 Master 浏览器引擎执行;本机保留 报表/日志/质量探测/改名/OTA/凭证切换
+        # ==========================================================
+
+        # 路由 1: 触发异步战报生成
+        if req_path == '/trigger_report':
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Action Accepted: tg_report\n")
+            os.system("nohup bash /opt/ip_sentinel/core/tg_report.sh >/dev/null 2>&1 &")
+
+        # 路由 4: 获取并回传实时日志切片
+        elif req_path == '/trigger_log':
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Action Accepted: fetch_log\n")
+                        
+            try:
+                config = {}
+                if os.path.exists('/opt/ip_sentinel/config.conf'):
+                    with open('/opt/ip_sentinel/config.conf', 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if '=' in line and not line.startswith('#'):
+                                key, val = line.split('=', 1)
+                                config[key] = val.strip('"\'')
+                
+                log_data = "日志文件不存在或为空"
+                log_path = '/opt/ip_sentinel/logs/sentinel.log'
+                if os.path.exists(log_path):
+                    with open(log_path, 'r', errors='ignore') as f:
+                        lines = f.readlines()
+                        if lines:
+                            log_data = html.escape("".join(lines[-15:]))
+                
+                # 动态提取终端状态以构建回传信息
+                local_ver = config.get('AGENT_VERSION', '未知')
+                node_alias = config.get('NODE_ALIAS', config.get('NODE_NAME', 'Unknown-Node'))
+                
+                text_msg = f"📄 <b>[{node_alias}] 实时日志 (v{local_ver}):</b>\n<pre><code>{log_data}</code></pre>"
+                
+                # [交互反馈] 构建内联 JSON Payload 回调指令
+                import json
+                node_name_cb = config.get('NODE_NAME', 'Unknown')
+                payload = {
+                    'chat_id': config.get('CHAT_ID', ''),
+                    'text': text_msg,
+                    'parse_mode': 'HTML',
+                    'reply_markup': {
+                        'inline_keyboard': [[{'text': '⚙️ 调出该节点控制台', 'callback_data': f'manage:{node_name_cb}'}]]
+                    }
+                }
+                data = json.dumps(payload).encode('utf-8')
+                
+                req = urllib.request.Request(
+                    config.get('TG_API_URL', ''), 
+                    data=data,
+                    headers={
+                        'User-Agent': f'IP-Sentinel-Agent/{local_ver}',
+                        'Content-Type': 'application/json'
+                    }
+                )
+                urllib.request.urlopen(req, timeout=10)
+                
+            except Exception as e:
+                print(f"Log transmission failed: {e}")
+
+        # 路由 5: 深海声呐模块触发
+        elif req_path == '/trigger_quality':
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Action Accepted: trigger_quality\n")
+            
+            if os.path.exists('/opt/ip_sentinel/core/mod_quality.sh'):
+                os.system("nohup bash /opt/ip_sentinel/core/mod_quality.sh >/dev/null 2>&1 &")
+
+        # 路由 6: 节点展示别名热修改 (全量 WAF 防护)
+        elif req_path == '/trigger_rename':
+            b64_alias = query.get('b64', [''])[0]
+            if not b64_alias:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"400 Bad Request: Alias is empty\n")
+                return
+                
+            import re
+            import base64
+            try:
+                # [防线/容灾] 还原安全 Base64 编码，屏蔽乱码级注入风险
+                pad = len(b64_alias) % 4
+                if pad > 0:
+                    b64_alias += '=' * (4 - pad)
+                b64_alias = b64_alias.replace('-', '+').replace('_', '/')
+                raw_alias = base64.b64decode(b64_alias).decode('utf-8', errors='ignore')
+                
+                # 强格式清洗：剔除潜在非法字符，保护 TG 面板不被恶意解析撑爆
+                decoded_alias = raw_alias.replace('_', '-')
+                safe_alias = re.sub(r'[^a-zA-Z0-9\-\u4e00-\u9fa5]', '', decoded_alias)[:20]
+                
+                if safe_alias:
+                    # [底层交互] 利用 fcntl 独占锁执行安全写操作，防止并发数据被截断
+                    config_path = '/opt/ip_sentinel/config.conf'
+                    import fcntl
+                    with open(config_path, 'r+', encoding='utf-8', errors='ignore') as f:
+                        fcntl.flock(f, fcntl.LOCK_EX)
+                        lines = f.readlines()
+                        
+                        alias_found = False
+                        for i, line in enumerate(lines):
+                            if line.startswith('NODE_ALIAS='):
+                                lines[i] = f'NODE_ALIAS="{safe_alias}"\n'
+                                alias_found = True
+                                break
+                                
+                        if not alias_found:
+                            lines.append(f'NODE_ALIAS="{safe_alias}"\n')
+                            
+                        f.seek(0)
+                        f.writelines(lines)
+                        f.truncate()
+                        fcntl.flock(f, fcntl.LOCK_UN)
+                        
+                    self.send_response(200)
+                    self.send_header("Content-type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b"Action Accepted: trigger_rename\n")
+                    return
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f"500 Internal Error\n".encode('utf-8'))
+                return
+            
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"400 Bad Request: Invalid Characters\n")
+
+        # 路由 8: 零信任 OTA 远程热更新链路
+        elif req_path == '/trigger_ota':
+            try:
+                config_mem = {}
+                config_path = '/opt/ip_sentinel/config.conf'
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', errors='ignore') as f:
+                        for line in f:
+                            line = line.strip()
+                            if '=' in line and not line.startswith('#'):
+                                key, val = line.split('=', 1)
+                                config_mem[key] = val.strip('"\'')
+                                
+                # [OTA 熔断器 1] 核验 Agent 本地策略是否授予了更新权限
+                if config_mem.get('ENABLE_OTA', 'false').lower() != 'true':
+                    self.send_response(403)
+                    self.end_headers()
+                    self.wfile.write(b"403 Forbidden: OTA Upgrade Disabled locally\n")
+                    return
+                    
+                # [OTA 熔断器 2] 检测官方网关硬编码限制，防范越权投毒
+                if config_mem.get('TG_TOKEN', '') == 'OFFICIAL_GATEWAY_MODE':
+                    self.send_response(403)
+                    self.end_headers()
+                    self.wfile.write(b"403 Forbidden: OTA strictly disabled under Public Gateway mode\n")
+                    return
+                    
+                self.send_response(200)
+                self.send_header("Content-type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"Action Accepted: trigger_ota\n")
+                
+                # [V3 安全修复] OTA 拉取锁定到仓库 MANIFEST (tag/commit 固定)，
+                # install.sh 落地前先与 MANIFEST 中记录的 SHA-256 强比对，
+                # 不匹配即熔断——bash -n 仅作为附加防截断检查
+                import shutil
+                import base64
+                repo_url = "https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
+                if os.path.exists('/opt/ip_sentinel/core/install.sh'):
+                    with open('/opt/ip_sentinel/core/install.sh', 'r') as f:
+                        for line in f:
+                            if line.startswith('REPO_RAW_URL='):
+                                repo_url = line.split('=', 1)[1].strip('"\'')
+                                break
+
+                err_msg = f"❌ **OTA 熔断告警**\n📍 节点: `{config_mem.get('NODE_ALIAS', '未知')}`\n⚠️ 原因: 下载内容与仓库 MANIFEST 锁定哈希不符或脚本语法校验未通过。\n🚀 状态: 升级已取消，节点安全。"
+                err_msg_b64 = base64.b64encode(err_msg.encode('utf-8')).decode('utf-8')
+
+                tg_url = config_mem.get('TG_API_URL', '')
+                chat_id = config_mem.get('CHAT_ID', '')
+
+                # 将升级逻辑进行 Base64 深层封装，免疫 Popen 或 Systemd 传递带来的指令注入风险
+                ota_script = f"""
+export SILENT_OTA="true"
+OTA_TMP=$(mktemp /tmp/ips_ota.XXXXXX.sh)
+MANIFEST_TMP=$(mktemp /tmp/ips_ota_manifest.XXXXXX)
+curl -fsSL {repo_url}/MANIFEST.sha256 -o "$MANIFEST_TMP" || MANIFEST_TMP=""
+if [ -z "$MANIFEST_TMP" ]; then
+    echo "OTA Aborted: MANIFEST.sha256 unavailable" > /opt/ip_sentinel/logs/ota_upgrade.log
+    exit 0
+fi
+curl -fsSL {repo_url}/core/install.sh -o "$OTA_TMP"
+EXPECTED=$(awk '$2 == "core/install.sh" {{print $1}}' "$MANIFEST_TMP")
+ACTUAL=$(sha256sum "$OTA_TMP" | awk '{{print $1}}')
+if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$OTA_TMP"; then
+    MSG=$(echo '{err_msg_b64}' | base64 -d)
+    curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" -d "text=$MSG" -d "parse_mode=Markdown" > /dev/null 2>&1
+    echo "OTA Integrity Failed: manifest mismatch" > /opt/ip_sentinel/logs/ota_upgrade.log
+else
+    bash "$OTA_TMP" > /opt/ip_sentinel/logs/ota_upgrade.log 2>&1
+fi
+rm -f "$OTA_TMP" "$MANIFEST_TMP"
+"""
+                ota_script_b64 = base64.b64encode(ota_script.encode('utf-8')).decode('utf-8')
+                
+                if shutil.which("systemd-run"):
+                    full_cmd = f"systemd-run --quiet --no-block bash -c \"echo '{ota_script_b64}' | base64 -d | bash\""
+                else:
+                    full_cmd = f"nohup bash -c \"echo '{ota_script_b64}' | base64 -d | bash\" >/dev/null 2>&1 &"
+                    
+                os.system(full_cmd)
+                
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f"500 Internal Error\n".encode('utf-8'))
+
+        # 路由 9: 全舰队 Bot 凭证切换 (Issue #102)
+        elif req_path == '/trigger_reconfig':
+            import json
+            import base64
+            import re
+            import fcntl
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            b64_payload = q.get('b64', [''])[0]
+            
+            if not b64_payload:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"400 Bad Request: Missing payload\n")
+                return
+            
+            try:
+                # [防线/容灾] 还原安全 Base64 编码
+                pad = len(b64_payload) % 4
+                if pad > 0:
+                    b64_payload += '=' * (4 - pad)
+                b64_payload = b64_payload.replace('-', '+').replace('_', '/')
+                payload = json.loads(base64.b64decode(b64_payload).decode('utf-8'))
+                new_token = str(payload.get('token', '')).strip()
+                new_chat_id = str(payload.get('chat_id', '')).strip()
+                
+                # [格式清洗] 强校验凭证形态，屏蔽注入与手误
+                if not re.match(r'^\d{6,}:[A-Za-z0-9_-]{30,}$', new_token):
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"400 Bad Request: Invalid token format\n")
+                    return
+                if not re.match(r'^-?\d{5,}$', new_chat_id):
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"400 Bad Request: Invalid chat id\n")
+                    return
+                
+                # [配置快照] 读取当前本地凭证
+                config_mem = {}
+                config_path = '/opt/ip_sentinel/config.conf'
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', errors='ignore') as f:
+                        for line in f:
+                            line = line.strip()
+                            if '=' in line and not line.startswith('#'):
+                                key, val = line.split('=', 1)
+                                config_mem[key] = val.strip('"\'')
+                
+                # [熔断器] 复用 OTA 权限作为切换闸门 (与 Master 端下发范围对齐)
+                if config_mem.get('ENABLE_OTA', 'false').lower() != 'true':
+                    self.send_response(403)
+                    self.end_headers()
+                    self.wfile.write(b"403 Forbidden: Reconfig disabled (ENABLE_OTA=false)\n")
+                    return
+                
+                old_chat_id = config_mem.get('CHAT_ID', '')
+                local_ver = config_mem.get('AGENT_VERSION', 'unknown')
+                
+                # [步骤 1] getMe 验证新 Bot Token，手误凭证在此拦截
+                # [防线/容灾] TG API 对无效凭证返回 HTTP 401，urlopen 会抛异常，需捕获后解析响应体
+                def tg_api_call(url, payload=None):
+                    headers = {'User-Agent': f'IP-Sentinel-Agent/{local_ver}'}
+                    data = None
+                    if payload is not None:
+                        data = json.dumps(payload).encode('utf-8')
+                        headers['Content-Type'] = 'application/json'
+                    req = urllib.request.Request(url, data=data, headers=headers)
+                    try:
+                        return json.loads(urllib.request.urlopen(req, timeout=8).read().decode('utf-8'))
+                    except urllib.error.HTTPError as he:
+                        try:
+                            return json.loads(he.read().decode('utf-8'))
+                        except Exception:
+                            return {'ok': False, 'description': f'HTTP {he.code}'}
+                
+                me_resp = tg_api_call(f"https://api.telegram.org/bot{new_token}/getMe")
+                if not me_resp.get('ok'):
+                    self.send_response(403)
+                    self.end_headers()
+                    self.wfile.write(f"403 Forbidden: New bot getMe failed: {me_resp.get('description', 'unknown')}\n".encode('utf-8'))
+                    return
+                
+                # [步骤 2] 向新 Bot 推送注册回执 (先推后改，失败时旧凭证保持完好)
+                node_name = config_mem.get('NODE_NAME', '')
+                comm_ip = config_mem.get('COMM_IP', config_mem.get('PUBLIC_IP', ''))
+                agent_port = config_mem.get('AGENT_PORT', '9527')
+                node_alias = config_mem.get('NODE_ALIAS', node_name)
+                reg_msg = "#REGISTER#|{}|{}|{}|{}|{}|{}".format(
+                    config_mem.get('REGION_CODE', 'UNKNOWN'),
+                    node_name, comm_ip, agent_port, node_alias,
+                    config_mem.get('ENABLE_OTA', 'false')
+                )
+                
+                send_resp = tg_api_call(
+                    f"https://api.telegram.org/bot{new_token}/sendMessage",
+                    {'chat_id': new_chat_id, 'text': reg_msg}
+                )
+                if not send_resp.get('ok'):
+                    self.send_response(403)
+                    self.end_headers()
+                    self.wfile.write(f"403 Forbidden: Registration push failed: {send_resp.get('description', 'unknown')}\n".encode('utf-8'))
+                    return
+                
+                # [步骤 3] flock 独占锁原子重写本地凭证三件套
+                with open(config_path, 'r+', encoding='utf-8', errors='ignore') as f:
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    lines = f.readlines()
+                    
+                    new_pairs = [
+                        ('TG_TOKEN', new_token),
+                        ('CHAT_ID', new_chat_id),
+                        ('TG_API_URL', f"https://api.telegram.org/bot{new_token}/sendMessage")
+                    ]
+                    for key, new_val in new_pairs:
+                        prefix = f"{key}="
+                        found = False
+                        for i, line in enumerate(lines):
+                            if line.startswith(prefix):
+                                lines[i] = f'{prefix}"{new_val}"\n'
+                                found = True
+                                break
+                        if not found:
+                            lines.append(f'{prefix}"{new_val}"\n')
+                    
+                    f.seek(0)
+                    f.writelines(lines)
+                    f.truncate()
+                    fcntl.flock(f, fcntl.LOCK_UN)
+                
+                # [先应答] 在重启前把成功回执交还给 Master
+                self.send_response(200)
+                self.send_header("Content-type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"Action Accepted: trigger_reconfig\n")
+                
+                # [步骤 4] 延迟 3 秒重启守护进程以重载新凭证上下文
+                # [V2 说明] 指令通道 PSK (NODE_PSK) 不随 TG 凭证切换而轮换，鉴权不受影响
+                # [防线/容灾] pkill pattern 用字符类 webhoo[k] 避免匹配到本包装进程自身的命令行
+                if new_chat_id != old_chat_id:
+                    os.system("nohup bash -c 'sleep 3 && (systemctl restart ip-sentinel-agent-daemon.service 2>/dev/null || (pkill -f \"core/webhoo[k].py\"; nohup bash /opt/ip_sentinel/core/agent_daemon.sh >/dev/null 2>&1 &))' >/dev/null 2>&1 &")
+                
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f"500 Internal Error\n".encode('utf-8'))
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+import socket
+import threading
+# ----------------------------------------------------------
+# [核心架构] 多线程非阻塞 Socket 模型 (抵抗 Slowloris 及阻塞攻击)
+# [V6 加固] 并发上限 24 线程，过载连接直接关闭，防线程耗尽 DoS
+# ----------------------------------------------------------
+class DualStackServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    _conn_sem = threading.BoundedSemaphore(24)
+
+    def process_request(self, request, client_address):
+        if not self._conn_sem.acquire(blocking=False):
+            # 并发过载：直接断开，不进入处理队列
+            try:
+                request.close()
+            except Exception:
+                pass
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._conn_sem.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._conn_sem.release()
+
+    def server_bind(self):
+        # [核心魔改] 强行解除 Linux/Unix 的 IPv6 独占锁
+        # 实现一个 Socket 对象同时接管 IPv4 (0.0.0.0) 和 IPv6 (::) 的全域监听防漏接机制
+        if self.address_family == socket.AF_INET6:
+            try:
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except Exception:
+                pass
+        super().server_bind()
+
+# [v4.2.2 终极架构] 彻底抛弃配置文件的 IP 束缚，强行探测系统底层的双栈能力
+bind_addr = "::"
+address_family = socket.AF_INET6
+try:
+    # 探针：如果机器是纯 IPv4 (连内核级的 IPv6 模块都没有被加载)，强绑 :: 会引发 OSError，此时自动降维
+    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    s.close()
+except OSError:
+    bind_addr = "0.0.0.0"
+    address_family = socket.AF_INET
+
+DualStackServer.address_family = address_family
+httpd = DualStackServer((bind_addr, PORT), AgentHandler)
+
+# ----------------------------------------------------------
+# [加密通信] 强制全网挂载 TLS 加密隧道上下文
+# ----------------------------------------------------------
+import ssl
+cert_path = '/opt/ip_sentinel/core/cert.pem'
+key_path = '/opt/ip_sentinel/core/key.pem'
+
+if os.path.exists(cert_path) and os.path.exists(key_path):
+    try:
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    except Exception as e:
+        print(f"SSL 隧道构建失败，退化为 HTTP: {e}")
+
+try:
+    httpd.serve_forever()
+except Exception as e:
+    sys.exit(1)
