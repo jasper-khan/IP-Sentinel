@@ -255,18 +255,31 @@ def run_session(node, region_code, socks_port, persona, keywords):
         proxy = None
         proxy_desc = "direct (local egress)"
 
+    # [persona 注入] timezone 必须经 config 传递 (camoufox 构造函数无 timezone 参数);
+    # 与持久化噪声种子合并——set_into 只在键不存在时写入,预置即锁定
+    node_config = dict(node_seeds)
+    node_config["timezone"] = persona["timezone"]
+
+    # geolocation 为 dict 格式;locale 用 语言-地区 全格式 (en-US 而非 en)
+    locale_full = persona["locale"]
+    if "-" not in locale_full:
+        cc = region_code.upper()
+        common = {"US": "en-US", "GB": "en-GB", "FR": "fr-FR", "DE": "de-DE",
+                  "JP": "ja-JP", "KR": "ko-KR", "TW": "zh-TW", "SG": "en-SG",
+                  "AU": "en-AU", "CA": "en-CA", "IN": "en-IN"}
+        locale_full = common.get(cc, "en-US")
+
     log("启动会话: region=%s tz=%s locale=%s lat,lon=(%.4f,%.4f) proxy=%s"
-        % (region_code, persona["timezone"], persona["locale"],
+        % (region_code, persona["timezone"], locale_full,
            persona["lat"], persona["lon"], proxy_desc))
 
     with Camoufox(
         fingerprint=node_fp,
-        config=node_seeds,
+        config=node_config,
         i_know_what_im_doing=True,          # 自定义持久化指纹为有意行为
         proxy=proxy,
-        locale=persona["locale"],
-        timezone=persona["timezone"],
-        geolocation=(persona["lat"], persona["lon"]),
+        locale=locale_full,
+        geolocation={"latitude": persona["lat"], "longitude": persona["lon"]},
         humanize=True,                      # Camoufox 原生拟人光标/滚动
         persistent_context=True,
         user_data_dir=profile_dir,

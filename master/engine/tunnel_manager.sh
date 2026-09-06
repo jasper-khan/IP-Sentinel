@@ -106,6 +106,22 @@ reap_tunnel() {
     unset "CHILD_PIDS[$n]"
 }
 
+# 本机公网 IP 探测 (启动时一次;判定"同机节点"跳过其隧道)
+LOCAL_EGRESS_IP=$(curl -4 -s -m 5 api.ip.sb/ip 2>/dev/null | tr -d '[:space:]')
+log "本机出口 IP: ${LOCAL_EGRESS_IP:-未知}"
+
+# 判定节点是否与 Master 同机:
+#   - 注册地址含回环 (127.0.0.1 / ::1)
+#   - 或注册首地址 == 本机出口公网 IP (双栈串如 1.2.3.4_[v6] 取第一段)
+is_local_node() {
+    local addr="$1"
+    local first
+    first=$(echo "$addr" | tr '_' ',' | cut -d',' -f1)
+    [[ "$first" == 127.0.0.1 || "$first" == ::1 ]] && return 0
+    [ -n "$LOCAL_EGRESS_IP" ] && [ "$first" == "$LOCAL_EGRESS_IP" ] && return 0
+    return 1
+}
+
 load_port_map
 log "========== 隧道池管理器启动 =========="
 
@@ -118,8 +134,8 @@ while true; do
         [ -z "$n" ] && continue
         SEEN["$n"]=1
 
-        # 跳过本机节点 (Master 与 Agent 同机: 无需隧道,直接本机出口)
-        if [[ "$ip" == 127.0.0.1 || "$ip" == ::1 ]]; then
+        # 同机节点 (Master 与 Agent 同装): 无需隧道,引擎直连本机出口
+        if is_local_node "$ip"; then
             continue
         fi
 

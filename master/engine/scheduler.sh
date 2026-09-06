@@ -64,10 +64,27 @@ node_running() {
     pgrep -f -- "--node $1 " >/dev/null 2>&1
 }
 
+# 本机公网 IP (判定同机节点直连;与 tunnel_manager 同逻辑)
+LOCAL_EGRESS_IP=$(curl -4 -s -m 5 api.ip.sb/ip 2>/dev/null | tr -d '[:space:]')
+
+is_local_node() {
+    local addr="$1"
+    local first
+    first=$(echo "$addr" | tr '_' ',' | cut -d',' -f1)
+    [[ "$first" == 127.0.0.1 || "$first" == ::1 ]] && return 0
+    [ -n "$LOCAL_EGRESS_IP" ] && [ "$first" == "$LOCAL_EGRESS_IP" ] && return 0
+    return 1
+}
+
 launch_session() {
-    local n="$1" region="$2" lang_params="$3" lat="$4" lon="$5"
+    local n="$1" region="$2" lang_params="$3" lat="$4" lon="$5" node_ip="$6"
     local port
     port=$(node_port "$n")
+
+    # 同机节点: 无视端口映射,直接本机出口 (隧道池已跳过其隧道)
+    if is_local_node "$node_ip"; then
+        port=""
+    fi
 
     ensure_keywords "$region"
 
@@ -111,9 +128,9 @@ while true; do
     SLOTS=$((ENGINE_CONCURRENCY - ACTIVE))
 
     if [ "$SLOTS" -gt 0 ]; then
-        NODES=$(db_exec "SELECT node_name, region, IFNULL(lang_params,''), IFNULL(base_lat,''), IFNULL(base_lon,'') FROM nodes WHERE psk IS NOT NULL AND psk != '' ORDER BY last_seen DESC;")
+        NODES=$(db_exec "SELECT node_name, region, IFNULL(lang_params,''), IFNULL(base_lat,''), IFNULL(base_lon,''), IFNULL(agent_ip,'') FROM nodes WHERE psk IS NOT NULL AND psk != '' ORDER BY last_seen DESC;")
 
-        while IFS='|' read -r n region lang_params lat lon; do
+        while IFS='|' read -r n region lang_params lat lon node_ip; do
             [ -z "$n" ] && continue
             [ "$SLOTS" -le 0 ] && break
             region="${region:-US}"
@@ -131,7 +148,7 @@ while true; do
                 continue
             fi
 
-            launch_session "$n" "$region" "$lang_params" "$lat" "$lon"
+            launch_session "$n" "$region" "$lang_params" "$lat" "$lon" "$node_ip"
             SLOTS=$((SLOTS - 1))
         done <<< "$NODES"
     fi
