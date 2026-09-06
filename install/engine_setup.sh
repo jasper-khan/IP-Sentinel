@@ -111,7 +111,8 @@ After=network-online.target ip-sentinel-tunnels.service
 [Service]
 Environment="MASTER_DIR=${MASTER_DIR}"
 Environment="DB_FILE=${MASTER_DIR}/sentinel.db"
-Environment="ENGINE_CONCURRENCY=${ENGINE_CONCURRENCY:-1}"
+# 并发会话数: 2C/2G 建议 2; 内存充裕可调高 (每会话约 500-700M)
+Environment="ENGINE_CONCURRENCY=${ENGINE_CONCURRENCY:-2}"
 Environment="ENGINE_MIN_INTERVAL=${ENGINE_MIN_INTERVAL:-5400}"
 ExecStart=/bin/bash ${MASTER_DIR}/engine/scheduler.sh
 Restart=always
