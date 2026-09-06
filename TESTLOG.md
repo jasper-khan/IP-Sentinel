@@ -62,11 +62,13 @@ webhook.py 隔离实验台 (fcntl shim + 测试 config):
 - [x] 修复 bug 8: 区域自检判定纳入 jump 落地域主信号 (002 实测 jump=com.hk 被误判 OK);7 用例单测全过
 - [~] 指纹复用双会话验证 (运行中)
 
-## 重要发现
+## 观察项 (原误报为"轻送中",已更正)
 
-**002 的 IP (192.255.172.110, HostPapa LA) 被 Google 302 至 google.com.hk** —
-轻度送中实锤(与 cloudnium 旧机同段同 ASN)。这台测试机本身就是养护对象,
-区域自检将持续报告 SINICIZED (修复后的判定),可作真实效果的天然观察窗口。
+浏览器会话一次观察到 jump=www.google.com.hk,但与三个独立信号矛盾:
+curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
+判定: 单次孤立样本,证据不足,非送中。调度器后续会话将持续采样,
+若 jump=com.hk 复现则说明 Google 对该 IP 有 HK 倾向(值得养护),
+不复现则为噪声。→ 自检判定的单信号矛盾场景应降级为"观察"待数据。
 
 ### Agent 安装明细验证
 - config: AGENT_VERSION=5.2.1, REGION=US-LA, AGENT_PORT=36357, NODE_ALIAS=L-test
