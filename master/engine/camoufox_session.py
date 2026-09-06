@@ -37,6 +37,8 @@ ENGINE_LOG = os.path.join(MASTER_DIR, "logs", "engine.log")
 REGION_DATA_ROOT = os.path.join(MASTER_DIR, "data", "regions")
 KEYWORDS_ROOT = os.path.join(MASTER_DIR, "data", "keywords")
 
+NODE = "-"   # 由 main() 按 --node 覆盖
+
 
 def log(msg):
     line = "[%s] [Engine ] [%s] %s" % (
@@ -145,12 +147,105 @@ def safe_url(url):
         return False
 
 
+# ==========================================================
+# [指纹持久化] 一个节点 = 一套固定设备身份
+# Camoufox 默认每次启动随机重掷指纹 (BrowserForge + canvas/audio/fonts
+# 噪声种子,上游 issue #442 未解决)。真实设备不会每天换脸——本引擎
+# 在 profile 旁持久化首次生成的完整指纹与噪声种子,后续会话回灌:
+#   <PROFILE_ROOT>/<node>/fingerprint.json  完整 BrowserForge 指纹
+#   <PROFILE_ROOT>/<node>/seeds.json        canvas/audio/fonts 噪声种子
+# 噪声种子经 config 预置 (camoufox utils.set_into 尊重已存在的键),
+# 不再每启动随机。
+# ==========================================================
+FINGERPRINT_FILE = "fingerprint.json"
+SEEDS_FILE = "seeds.json"
+
+
+def _load_fingerprint(fp_path):
+    """从磁盘重建 BrowserForge Fingerprint 对象;损坏则返回 None。"""
+    if not os.path.isfile(fp_path):
+        return None
+    try:
+        from browserforge.fingerprints import (
+            Fingerprint, ScreenFingerprint, NavigatorFingerprint, VideoCard,
+        )
+        with open(fp_path, encoding="utf-8") as f:
+            d = json.load(f)
+        return Fingerprint(
+            screen=ScreenFingerprint(**d["screen"]),
+            navigator=NavigatorFingerprint(**d["navigator"]),
+            headers=d["headers"],
+            videoCodecs=d["videoCodecs"],
+            audioCodecs=d["audioCodecs"],
+            pluginsData=d["pluginsData"],
+            battery=d["battery"],
+            videoCard=VideoCard(**d["videoCard"]) if d["videoCard"] else None,
+            multimediaDevices=d["multimediaDevices"],
+            fonts=d["fonts"],
+            mockWebRTC=d["mockWebRTC"],
+            slim=d["slim"],
+        )
+    except Exception:
+        return None
+
+
+def obtain_fingerprint(profile_dir):
+    """取该节点的持久化指纹;首次会话生成 Firefox 指纹并存盘。"""
+    fp_path = os.path.join(profile_dir, FINGERPRINT_FILE)
+
+    fp = _load_fingerprint(fp_path)
+    if fp is not None and "Firefox" in fp.navigator.userAgent:
+        log("指纹复用 (持久化): %s" % fp.navigator.userAgent[:80])
+        return fp
+
+    # 首次: 生成 Firefox 指纹 (camoufox 同款生成器) 并存盘
+    from camoufox.fingerprints import generate_fingerprint
+    fp = generate_fingerprint()
+    with open(fp_path, "w", encoding="utf-8") as f:
+        f.write(fp.dumps())
+    os.chmod(fp_path, 0o600)
+    log("指纹生成并持久化: %s" % fp.navigator.userAgent[:80])
+    return fp
+
+
+def obtain_seeds(profile_dir):
+    """取该节点的持久化噪声种子;首次生成并存盘。
+    经 config 预置注入后,camoufox 的每启动随机种子不再生效
+    (set_into 只在键不存在时写入)。"""
+    seeds_path = os.path.join(profile_dir, SEEDS_FILE)
+
+    if os.path.isfile(seeds_path):
+        try:
+            with open(seeds_path, encoding="utf-8") as f:
+                seeds = json.load(f)
+            if all(k in seeds for k in ("fonts:spacing_seed", "audio:seed", "canvas:seed")):
+                log("噪声种子复用 (持久化)")
+                return seeds
+        except (OSError, ValueError):
+            pass
+
+    seeds = {
+        "fonts:spacing_seed": random.randint(1, 4294967295),
+        "audio:seed": random.randint(1, 4294967295),
+        "canvas:seed": random.randint(1, 4294967295),
+    }
+    with open(seeds_path, "w", encoding="utf-8") as f:
+        json.dump(seeds, f)
+    os.chmod(seeds_path, 0o600)
+    log("噪声种子生成并持久化")
+    return seeds
+
+
 def run_session(node, region_code, socks_port, persona, keywords):
     """一次完整拟人会话。任何浏览器层异常只记日志,不抛出 (调度器兜底)。"""
     from camoufox.sync_api import Camoufox
 
     profile_dir = os.path.join(PROFILE_ROOT, node)
     os.makedirs(profile_dir, exist_ok=True)
+
+    # [指纹持久化] 该节点的固定设备身份
+    node_fp = obtain_fingerprint(profile_dir)
+    node_seeds = obtain_seeds(profile_dir)
 
     # socks_port=0 → 同机模式 (Master 与 Agent 同装),直接本机出口
     if socks_port:
@@ -165,6 +260,9 @@ def run_session(node, region_code, socks_port, persona, keywords):
            persona["lat"], persona["lon"], proxy_desc))
 
     with Camoufox(
+        fingerprint=node_fp,
+        config=node_seeds,
+        i_know_what_im_doing=True,          # 自定义持久化指纹为有意行为
         proxy=proxy,
         locale=persona["locale"],
         timezone=persona["timezone"],

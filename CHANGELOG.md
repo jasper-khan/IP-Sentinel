@@ -1,5 +1,11 @@
 # Changelog
 
+## [v5.1.0-fork] - 2026-09-06
+
+### ✨ Features
+
+- **节点级指纹持久化** — 一个节点 = 一套固定设备身份。Camoufox 默认每次启动随机重掷指纹 (BrowserForge 指纹 + canvas/audio/fonts 噪声种子,上游 #442 未解决),与"每个 IP 上的稳定真人"身份模型矛盾。现首次会话生成的完整指纹落盘 `<profile>/fingerprint.json`、噪声种子落盘 `seeds.json`,后续会话经 `fingerprint=` + `config=` (种子预置,`set_into` 尊重已存在键) 回灌同一套身份;跨节点指纹天然隔离;损坏文件自动重新生成 (换设备身份,日志可查)
+
 ## [v5.0.0-fork] - 2026-09-06
 
 ### 💥 Breaking Changes (curl 引擎退役)
