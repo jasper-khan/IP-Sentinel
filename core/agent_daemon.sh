@@ -119,52 +119,94 @@ def clean_used_signs():
     for s in expired:
         del USED_SIGNS[s]
 
-# [权限鉴权] 提取 CHAT_ID 作为 PSK 预共享密钥
+# [权限鉴权 V2 修复] 每节点独立高熵 PSK (256-bit) 作为 HMAC 预共享密钥
+# 绝不回退到低熵/半公开的 chat_id；PSK 缺失或畸形时拒绝监听
 AUTH_TOKEN = ""
 if os.path.exists('/opt/ip_sentinel/config.conf'):
     with open('/opt/ip_sentinel/config.conf', 'r') as f:
         for line in f:
             line = line.strip()
-            if line.startswith('CHAT_ID='):
+            if line.startswith('NODE_PSK='):
                 AUTH_TOKEN = line.split('=', 1)[1].strip('"\'')
                 break
 
+if not re.fullmatch(r'[0-9a-fA-F]{64}', AUTH_TOKEN or ''):
+    print("FATAL: NODE_PSK missing or malformed (expect 64 hex chars). Refusing to listen.")
+    sys.exit(1)
+
+# ----------------------------------------------------------
+# [V2 加固] 鉴权失败在线限速 (抗 PSK 爆破)：单 IP 60s 内 5 次失败 → 封禁 300s
+# ----------------------------------------------------------
+AUTH_FAILS = {}
+AUTH_BAN = {}
+
+def is_banned(ip):
+    until = AUTH_BAN.get(ip, 0)
+    now = time.time()
+    if now < until:
+        return True
+    AUTH_BAN.pop(ip, None)
+    return False
+
+def record_auth_fail(ip):
+    now = time.time()
+    fails = [t for t in AUTH_FAILS.get(ip, []) if now - t < 60]
+    fails.append(now)
+    AUTH_FAILS[ip] = fails
+    if len(fails) >= 5:
+        AUTH_BAN[ip] = now + 300
+        AUTH_FAILS[ip] = []
+
 class AgentHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        # [V2 加固] 封禁期内直接拒绝 (不区分原因，不给预言机)
+        client_ip = self.client_address[0]
+        if is_banned(client_ip):
+            try:
+                self.send_response(429)
+                self.end_headers()
+            except Exception:
+                pass
+            return
+
         # [权限校验] 路径解析与 HMAC-SHA256 动态签名核验
         parsed = urllib.parse.urlparse(self.path)
         req_path = parsed.path
-        
+
         if AUTH_TOKEN:
             query = urllib.parse.parse_qs(parsed.query)
             req_t = query.get('t', [''])[0]
             req_sign = query.get('sign', [''])[0]
-            
+
             if not req_t or not req_sign:
+                record_auth_fail(client_ip)
                 self.send_response(401)
                 self.end_headers()
-                self.wfile.write(b"401 Unauthorized: Missing Signature\n")
+                self.wfile.write(b"401 Unauthorized\n")
                 return
-                
+
             try:
                 current_time = int(time.time())
                 # [防重放 1] 校验时间戳防偏离 (±60秒窗口，免疫隔夜抓包重放)
                 if abs(current_time - int(req_t)) > 60:
+                    record_auth_fail(client_ip)
                     self.send_response(401)
                     self.end_headers()
-                    self.wfile.write(b"401 Unauthorized: Request Expired\n")
+                    self.wfile.write(b"401 Unauthorized\n")
                     return
             except ValueError:
+                record_auth_fail(client_ip)
                 self.send_response(401)
                 self.end_headers()
                 return
-            
+
             # [防重放 2] Nonce 精确核对 (拦截 60 秒内的 MITM 并发重放洗劫)
             clean_used_signs()
             if req_sign in USED_SIGNS:
+                record_auth_fail(client_ip)
                 self.send_response(401)
                 self.end_headers()
-                self.wfile.write(b"401 Unauthorized: Replay Attack Detected\n")
+                self.wfile.write(b"401 Unauthorized\n")
                 return
                 
             # ==========================================================
@@ -180,11 +222,13 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
                 
             msg = f"{extra_payload}:{req_t}".encode('utf-8')
             expected_sign = hmac.new(AUTH_TOKEN.encode('utf-8'), msg, hashlib.sha256).hexdigest()
-            
+
+            # [V2 加固] 失败响应与其它 401 完全同文，不给攻击者可区分的爆破预言机
             if not hmac.compare_digest(expected_sign, req_sign):
+                record_auth_fail(client_ip)
                 self.send_response(401)
                 self.end_headers()
-                self.wfile.write(b"401 Unauthorized: Signature Mismatch\n")
+                self.wfile.write(b"401 Unauthorized\n")
                 return
             
             # 鉴权通过，登记 Nonce 载荷
@@ -363,7 +407,7 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"500 Internal Error: {str(e)}\n".encode('utf-8'))
+                self.wfile.write(f"500 Internal Error\n".encode('utf-8'))
                 return
             
             self.send_response(400)
@@ -414,7 +458,7 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"500 Internal Error: {str(e)}\n".encode('utf-8'))
+                self.wfile.write(f"500 Internal Error\n".encode('utf-8'))
 
         # 路由 8: 零信任 OTA 远程热更新链路
         elif req_path == '/trigger_ota':
@@ -468,14 +512,16 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
                 # 将升级逻辑进行 Base64 深层封装，免疫 Popen 或 Systemd 传递带来的指令注入风险
                 ota_script = f"""
 export SILENT_OTA="true"
-curl -fsSL {repo_url}/core/install.sh -o /tmp/ota_agent.sh
-if bash -n /tmp/ota_agent.sh; then
-    bash /tmp/ota_agent.sh > /opt/ip_sentinel/logs/ota_upgrade.log 2>&1
+OTA_TMP=$(mktemp /tmp/ips_ota.XXXXXX.sh)
+curl -fsSL {repo_url}/core/install.sh -o "$OTA_TMP"
+if bash -n "$OTA_TMP"; then
+    bash "$OTA_TMP" > /opt/ip_sentinel/logs/ota_upgrade.log 2>&1
 else
     MSG=$(echo '{err_msg_b64}' | base64 -d)
     curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" -d "text=$MSG" -d "parse_mode=Markdown" > /dev/null 2>&1
     echo "OTA Checksum Failed: Script corrupted" > /opt/ip_sentinel/logs/ota_upgrade.log
 fi
+rm -f "$OTA_TMP"
 """
                 ota_script_b64 = base64.b64encode(ota_script.encode('utf-8')).decode('utf-8')
                 
@@ -489,7 +535,7 @@ fi
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"500 Internal Error: {str(e)}\n".encode('utf-8'))
+                self.wfile.write(f"500 Internal Error\n".encode('utf-8'))
 
         # 路由 9: 全舰队 Bot 凭证切换 (Issue #102)
         elif req_path == '/trigger_reconfig':
@@ -626,7 +672,8 @@ fi
                 self.end_headers()
                 self.wfile.write(b"Action Accepted: trigger_reconfig\n")
                 
-                # [步骤 4] CHAT_ID 变更意味着 HMAC PSK 轮换，延迟 3 秒重启守护进程
+                # [步骤 4] 延迟 3 秒重启守护进程以重载新凭证上下文
+                # [V2 说明] 指令通道 PSK (NODE_PSK) 不随 TG 凭证切换而轮换，鉴权不受影响
                 # [防线/容灾] pkill pattern 用字符类 webhoo[k] 避免匹配到本包装进程自身的命令行
                 if new_chat_id != old_chat_id:
                     os.system("nohup bash -c 'sleep 3 && (systemctl restart ip-sentinel-agent-daemon.service 2>/dev/null || (pkill -f \"core/webhoo[k].py\"; nohup bash /opt/ip_sentinel/core/agent_daemon.sh >/dev/null 2>&1 &))' >/dev/null 2>&1 &")
@@ -634,7 +681,7 @@ fi
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"500 Internal Error: {str(e)}\n".encode('utf-8'))
+                self.wfile.write(f"500 Internal Error\n".encode('utf-8'))
 
         else:
             self.send_response(404)
@@ -644,11 +691,36 @@ fi
         pass
 
 import socket
+import threading
 # ----------------------------------------------------------
 # [核心架构] 多线程非阻塞 Socket 模型 (抵抗 Slowloris 及阻塞攻击)
+# [V6 加固] 并发上限 24 线程，过载连接直接关闭，防线程耗尽 DoS
 # ----------------------------------------------------------
 class DualStackServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
+    daemon_threads = True
+    _conn_sem = threading.BoundedSemaphore(24)
+
+    def process_request(self, request, client_address):
+        if not self._conn_sem.acquire(blocking=False):
+            # 并发过载：直接断开，不进入处理队列
+            try:
+                request.close()
+            except Exception:
+                pass
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._conn_sem.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._conn_sem.release()
+
     def server_bind(self):
         # [核心魔改] 强行解除 Linux/Unix 的 IPv6 独占锁
         # 实现一个 Socket 对象同时接管 IPv4 (0.0.0.0) 和 IPv6 (::) 的全域监听防漏接机制

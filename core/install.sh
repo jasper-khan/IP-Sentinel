@@ -267,7 +267,7 @@ else
         fi
 
         # 组装注册指令
-        REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}"
+        REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}"
 
         echo -e "\n📤 正在向 Telegram 推送注册指令..."
         TEXT_MSG="✨ *IP-Sentinel 重新发送注册指令！*
@@ -696,6 +696,13 @@ if [ "$UPGRADE_MODE" == "false" ]; then
     LANG_PARAMS=$(jq -r '.google_module.lang_params' "$REGION_JSON_FILE")
     VALID_URL_SUFFIX=$(jq -r '.google_module.valid_url_suffix' "$REGION_JSON_FILE")
 
+    # [V2 安全修复] 每节点独立高熵 PSK (256-bit)，替代共享低熵 chat_id 作为指令通道 HMAC 密钥
+    NODE_PSK=$(openssl rand -hex 32 2>/dev/null)
+    if [ ${#NODE_PSK} -ne 64 ]; then
+        echo -e "\033[31m❌ 致命错误：PSK 生成失败 (openssl 不可用)，为避免弱密钥拒绝继续安装。\033[0m"
+        exit 1
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 # IP-Sentinel 本地固化配置 (生成时间: $(date '+%Y-%m-%d %H:%M:%S'))
 AGENT_VERSION="$TARGET_VERSION"
@@ -714,6 +721,7 @@ TG_TOKEN="$TG_TOKEN"
 TG_API_URL="$TG_API_URL"
 CHAT_ID="$CHAT_ID"
 AGENT_PORT="$AGENT_PORT"
+NODE_PSK="$NODE_PSK"
 INSTALL_DIR="$INSTALL_DIR"
 LOG_FILE="${INSTALL_DIR}/logs/sentinel.log"
 
@@ -827,6 +835,20 @@ if [ "$UPGRADE_MODE" == "true" ]; then
         ENABLE_OTA="false"
     else
         ENABLE_OTA=$(grep "^ENABLE_OTA=" "$CONFIG_FILE" | cut -d'"' -f2)
+    fi
+
+    # [V2 安全修复] 老节点补铸每节点独立 PSK；并在升级完成后随注册报文同步至 Master
+    if ! grep -q "^NODE_PSK=" "$CONFIG_FILE"; then
+        NEW_PSK=$(openssl rand -hex 32 2>/dev/null)
+        if [ ${#NEW_PSK} -eq 64 ]; then
+            echo "NODE_PSK=\"$NEW_PSK\"" >> "$CONFIG_FILE"
+            NODE_PSK="$NEW_PSK"
+            echo -e "🔐 [安全升级] 已为老节点补铸独立 PSK (指令通道将切换为高熵密钥)！"
+        else
+            echo -e "\033[33m⚠️ PSK 生成失败 (openssl 不可用)，daemon 将拒绝对外监听，请修复后重装！\033[0m"
+        fi
+    else
+        NODE_PSK=$(grep "^NODE_PSK=" "$CONFIG_FILE" | cut -d'"' -f2)
     fi
 fi
 
@@ -1122,7 +1144,7 @@ EOF
 if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
     
     # 注册报文中塞入多宿主弹匣 SAFE_COMM_IP
-    REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${SAFE_COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}"
+    REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${SAFE_COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}"
     
     if [ "$UPGRADE_MODE" == "true" ]; then
         OLD_VERSION=$(grep "^AGENT_VERSION=" "$CONFIG_FILE" | cut -d'"' -f2)
@@ -1204,21 +1226,47 @@ if [[ -n "$TG_TOKEN" ]]; then
     # [v4.2.2 防火墙修正] 适配多宿主 IP 提示
     IS_V6_COMM="false"
     [[ "$SAFE_COMM_IP" == *":"* ]] && IS_V6_COMM="true"
-    
+
+    # [V2 安全修复] 询问 Master 出口 IP 用于防火墙限源 (强烈建议填写)
+    echo -e "\n\033[36m[V2 加固] 指令通道端口默认对全网开放是重大攻击面。\033[0m"
+    read -p "请输入 Master 司令部机器的公网出口 IP (用于防火墙限源，强烈建议填写；私有部署单机模式可直接回车跳过): " MASTER_EGRESS_IP
+    MASTER_EGRESS_IP=$(echo "$MASTER_EGRESS_IP" | tr -cd '0-9a-fA-F.:')
+    if [ -n "$MASTER_EGRESS_IP" ]; then
+        FW_SRC_NOTE="(限源: 仅 $MASTER_EGRESS_IP 可达)"
+    else
+        FW_SRC_NOTE="(⚠️ 未限源，全网可达——建议尽快补一条限源规则)"
+    fi
+
     FW_MSG=""
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -qw active; then
-        FW_MSG="ufw allow $AGENT_PORT/tcp"
+        if [ -n "$MASTER_EGRESS_IP" ]; then
+            FW_MSG="ufw allow from $MASTER_EGRESS_IP to any port $AGENT_PORT proto tcp"
+        else
+            FW_MSG="ufw allow $AGENT_PORT/tcp"
+        fi
     elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld | grep -qw active; then
-        FW_MSG="firewall-cmd --zone=public --add-port=$AGENT_PORT/tcp --permanent && firewall-cmd --reload"
+        if [ -n "$MASTER_EGRESS_IP" ]; then
+            FW_MSG="firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=\"$MASTER_EGRESS_IP\" port port=\"$AGENT_PORT\" protocol=\"tcp\" accept' && firewall-cmd --reload"
+        else
+            FW_MSG="firewall-cmd --zone=public --add-port=$AGENT_PORT/tcp --permanent && firewall-cmd --reload"
+        fi
     elif command -v iptables >/dev/null 2>&1; then
         if [ "$IS_V6_COMM" == "true" ]; then
             if command -v ip6tables >/dev/null 2>&1; then
-                FW_MSG="ip6tables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT"
+                if [ -n "$MASTER_EGRESS_IP" ]; then
+                    FW_MSG="ip6tables -I INPUT -p tcp -s $MASTER_EGRESS_IP --dport $AGENT_PORT -j ACCEPT"
+                else
+                    FW_MSG="ip6tables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT"
+                fi
             else
                 FW_MSG="iptables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT  # 提示: 系统缺失 ip6tables"
             fi
         else
-            FW_MSG="iptables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT"
+            if [ -n "$MASTER_EGRESS_IP" ]; then
+                FW_MSG="iptables -I INPUT -p tcp -s $MASTER_EGRESS_IP --dport $AGENT_PORT -j ACCEPT"
+            else
+                FW_MSG="iptables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT"
+            fi
         fi
     fi
     
@@ -1226,7 +1274,7 @@ if [[ -n "$TG_TOKEN" ]]; then
     echo -e "\033[33m为确保 Master 司令部能够成功下发指令，您【必须】前往云服务商 (如 AWS/Oracle/阿里云 等) 的网页控制台中，将安全组 (Security Group) 防火墙的 TCP $AGENT_PORT 端口彻底放行！\033[0m"
     echo -e "\033[31m⛔ 本系统已开启全域双栈监听，禁止尝试通过修改脚本强行绑定局域网 IP 来绕过通信阻断！\033[0m\n"
     if [ -n "$FW_MSG" ]; then
-        echo "💡 检测到本地系统防火墙开启，您可以尝试执行以下命令放行本机端口 (注意: 云端安全组仍需您手动放行)："
+        echo "💡 检测到本地系统防火墙开启，您可以尝试执行以下命令放行本机端口 $FW_SRC_NOTE (注意: 云端安全组仍需您手动放行)："
         echo -e "\033[36m   $FW_MSG\033[0m"
     fi
 fi

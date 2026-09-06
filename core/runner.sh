@@ -19,7 +19,8 @@ source "$CONFIG_FILE"
 # [防线 1] 进程排他锁管控
 # 严格防止高频并发重入引发的底层内存雪崩与死锁
 # ==========================================================
-exec 200>"/tmp/ip_sentinel_runner.lock"
+# [V5 安全修复] 锁文件移至安装目录 (root 私有)，避免 /tmp 可预测路径写穿
+exec 200>"${INSTALL_DIR:-/opt/ip_sentinel}/core/.runner.lock"
 if ! flock -n 200; then
     echo "[$(date)] ⚠️ 上一轮巡逻任务尚未结束，本次触发自动取消。" >> "$LOG_FILE"
     exit 0

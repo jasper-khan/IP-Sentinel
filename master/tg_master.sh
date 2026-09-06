@@ -15,6 +15,10 @@ MASTER_VERSION=${MASTER_VERSION:-"3.5.0"}
 OFFSET_FILE="${MASTER_DIR}/.tg_offset"
 [[ -f $OFFSET_FILE ]] || echo "0" > $OFFSET_FILE
 
+# [V5 安全修复] 调试日志目录 (限权) 就地创建
+mkdir -p "${MASTER_DIR}/logs" 2>/dev/null
+chmod 700 "${MASTER_DIR}/logs" 2>/dev/null
+
 # ==========================================================
 # 1. 核心工具组件
 # ==========================================================
@@ -51,7 +55,7 @@ send_msg() {
     local resp
     resp=$(curl -s --connect-timeout 5 -m 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
         -d "chat_id=$1" -d "text=$2" -d "parse_mode=Markdown")
-    echo "[$(date '+%H:%M:%S')] send_msg chat=$1 resp=${resp:0:200}" >> /tmp/sendmsg_debug.log
+    echo "[$(date '+%H:%M:%S')] send_msg chat=$1 resp=${resp:0:200}" >> "${MASTER_DIR}/logs/sendmsg_debug.log"
 }
 
 # [核心重构] UI 沉底重绘引擎：抹杀旧面板堆积，永远在最底部唤出新视图
@@ -114,64 +118,88 @@ db_exec() {
 }
 
 # ==========================================================
-# [安全漏洞 #108 修复] HMAC 签名引擎升级，实现参数全覆盖与双重握手降级
+# [安全架构 V2] 每节点独立 PSK 的 HMAC 签名引擎 + TOFU 证书锁定
+# - 签名密钥 = 节点注册时同步的 256-bit NODE_PSK (不再使用共享低熵 chat_id)
+# - Master 调用前校验 Agent 自签证书指纹 (首次 TOFU 信任并入库，此后强校验)
+# - 移除 V1 降级签名路径 (审计 V4：降级路径可被 MITM 主动诱发)
 # ==========================================================
 generate_signed_url() {
     local target_ip=$1
     local target_port=$2
     local action_path=$3
     local extra_query=$4
+    local node_psk=$5
     local current_t=$(date +%s)
-    
+
     local payload_v2="${action_path}"
     [ -n "$extra_query" ] && payload_v2="${payload_v2}?${extra_query}"
     payload_v2="${payload_v2}:${current_t}"
-    
-    local signature_v2=$(echo -n "$payload_v2" | openssl dgst -sha256 -mac HMAC -macopt key:"$CHAT_ID" | awk '{print $NF}')
-    
+
+    local signature_v2=$(echo -n "$payload_v2" | openssl dgst -sha256 -mac HMAC -macopt key:"$node_psk" | awk '{print $NF}')
+
     local url_v2="https://${target_ip}:${target_port}${action_path}?t=${current_t}&sign=${signature_v2}"
     [ -n "$extra_query" ] && url_v2="${url_v2}&${extra_query}"
-    
+
     echo "$url_v2"
 }
 
-generate_signed_url_v1() {
-    local target_ip=$1
-    local target_port=$2
-    local action_path=$3
-    local extra_query=$4
-    local current_t=$(date +%s)
-    
-    local payload_v1="${action_path}:${current_t}"
-    local signature_v1=$(echo -n "$payload_v1" | openssl dgst -sha256 -mac HMAC -macopt key:"$CHAT_ID" | awk '{print $NF}')
-    
-    local url_v1="https://${target_ip}:${target_port}${action_path}?t=${current_t}&sign=${signature_v1}"
-    [ -n "$extra_query" ] && url_v1="${url_v1}&${extra_query}"
-    
-    echo "$url_v1"
+# [TOFU 证书锁定] 返回: 0=校验通过/首次信任  1=指纹不匹配(疑似 MITM)  2=无法建立 TLS
+verify_agent_tls() {
+    local v_ip=$1
+    local v_port=$2
+    local v_node=$3
+
+    local v_fp
+    v_fp=$(echo | openssl s_client -connect "${v_ip}:${v_port}" -servername "agent" 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d'=' -f2 | tr -d ':')
+    [ -z "$v_fp" ] && return 2
+
+    local pinned
+    pinned=$(db_exec "SELECT cert_fp FROM nodes WHERE chat_id='${CHAT_ID}' AND node_name='${v_node}' LIMIT 1;" | head -n 1 | tr -d '[:space:]')
+
+    if [ -z "$pinned" ]; then
+        db_exec "UPDATE nodes SET cert_fp='${v_fp}' WHERE chat_id='${CHAT_ID}' AND node_name='${v_node}';"
+        return 0
+    fi
+
+    if [ "$pinned" = "$v_fp" ]; then
+        return 0
+    fi
+    return 1
 }
 
 call_agent() {
-    local ips="$1"
-    local port="$2"
-    local path="$3"
-    local extra_q="$4"
+    local node_key=$1
+    local ips=$2
+    local port=$3
+    local path=$4
+    local extra_q=$5
     local res="FAILED"
-    
+
+    # [V2 门禁] 无独立 PSK 的节点 (老版本/异常注册) 一律拒绝下发指令
+    local node_psk
+    node_psk=$(db_exec "SELECT psk FROM nodes WHERE chat_id='${CHAT_ID}' AND node_name='${node_key}' LIMIT 1;" | head -n 1 | tr -d '[:space:]')
+    if ! [[ "$node_psk" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "FAILED_NO_PSK"
+        return
+    fi
+
     local clean_ips=$(echo "$ips" | tr '_' ',')
     IFS=',' read -r -a ip_array <<< "$clean_ips"
     for ip in "${ip_array[@]}"; do
         if [ -n "$ip" ]; then
-            # 优先使用完整的 V2 签名
-            local url_v2=$(generate_signed_url "$ip" "$port" "$path" "$extra_q")
-            res=$(curl -k -s --connect-timeout 4 -m 12 "$url_v2" || echo "FAILED")
-            
-            # 若对方返回 401 鉴权失败，说明其为老版本 Agent，触发平滑降级使用 V1 签名
-            if [[ "$res" == *"401"* ]] || [[ "$res" == *"Unauthorized"* ]]; then
-                local url_v1=$(generate_signed_url_v1 "$ip" "$port" "$path" "$extra_q")
-                res=$(curl -k -s --connect-timeout 4 -m 12 "$url_v1" || echo "FAILED")
+            # [TOFU] 证书指纹校验：不匹配即中止该节点通讯 (防 MITM)
+            verify_agent_tls "$ip" "$port" "$node_key"
+            TLS_RC=$?
+            if [ "$TLS_RC" -eq 1 ]; then
+                send_msg "$CHAT_ID" "🚨 **[安全告警] 节点 \`${node_key}\` (${ip}) 证书指纹与锁定值不符！疑似中间人攻击，本次指令已中止。**"
+                echo "FAILED_TLS_MISMATCH"
+                return
             fi
-            
+
+            local url_v2=$(generate_signed_url "$ip" "$port" "$path" "$extra_q" "$node_psk")
+            res=$(curl -k -s --connect-timeout 4 -m 12 "$url_v2" || echo "FAILED")
+
             if [ "$res" != "FAILED" ] && [ -n "$res" ]; then
                 echo "$res"
                 return
@@ -192,6 +220,9 @@ db_exec "ALTER TABLE nodes ADD COLUMN node_alias TEXT;" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_google TEXT DEFAULT 'true';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_trust TEXT DEFAULT 'true';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_ota TEXT DEFAULT 'false';" 2>/dev/null
+# [V2 安全修复] 每节点独立 PSK 与 TOFU 证书指纹列
+db_exec "ALTER TABLE nodes ADD COLUMN psk TEXT;" 2>/dev/null
+db_exec "ALTER TABLE nodes ADD COLUMN cert_fp TEXT;" 2>/dev/null
 
 db_exec "CREATE TABLE IF NOT EXISTS ip_trend_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -276,7 +307,7 @@ while true; do
             fi
             
             REPLY_TO_TEXT=$(echo "$UPDATE" | jq -r '.message.reply_to_message.text // empty')
-            echo "[$(date '+%H:%M:%S')] DBG text_len=${#TEXT} reply_len=${#REPLY_TO_TEXT} head=[$(printf '%s' "$TEXT" | head -c 60)]" >> /tmp/reconfig_debug.log
+            echo "[$(date '+%H:%M:%S')] DBG text_len=${#TEXT} reply_len=${#REPLY_TO_TEXT} head=[$(printf '%s' "$TEXT" | head -c 60)]" >> "${MASTER_DIR}/logs/reconfig_debug.log"
 
             # ----------------------------------------------------------
             # [业务流 B] 拦截并解析别名重命名回执
@@ -305,7 +336,7 @@ while true; do
              if [ -n "$RECONFIG_CANDIDATE" ]; then
                  # [格式归一] 支持上下两行 (Token/ChatID) 或一行空格分隔
                  RECONFIG_INPUT=$(echo "$RECONFIG_CANDIDATE" | tr $'\n' ' ' | tr -cd '0-9A-Za-z:_ -' | tr -s ' ' | sed 's/^ //; s/ $//')
-                 echo "[$(date '+%H:%M:%S')] B2_HIT INPUT=[$RECONFIG_INPUT]" >> /tmp/reconfig_debug.log
+                 echo "[$(date '+%H:%M:%S')] B2_HIT INPUT=[$RECONFIG_INPUT]" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                  if [ -n "$RECONFIG_INPUT" ]; then
                      TEXT="do_reconfig:${RECONFIG_INPUT}"
                  fi
@@ -322,20 +353,26 @@ while true; do
                 REG_LINE=$(echo "$TEXT" | grep "#REGISTER#" | head -n 1 | tr -d '\` ')
                 
                 FIELD_COUNT=$(echo "$REG_LINE" | awk -F'|' '{print NF}')
-                if [ "$FIELD_COUNT" -ge 7 ]; then
+                if [ "$FIELD_COUNT" -ge 8 ]; then
+                    IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK <<< "$REG_LINE"
+                elif [ "$FIELD_COUNT" -eq 7 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA <<< "$REG_LINE"
+                    RAW_PSK=""
                 elif [ "$FIELD_COUNT" -eq 6 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS <<< "$REG_LINE"
                     RAW_OTA="false"
+                    RAW_PSK=""
                 elif [ "$FIELD_COUNT" -eq 5 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT <<< "$REG_LINE"
                     RAW_ALIAS="$RAW_NODE"
                     RAW_OTA="false"
+                    RAW_PSK=""
                 else
                     IFS='|' read -r MAGIC RAW_NODE RAW_IP RAW_PORT <<< "$REG_LINE"
                     RAW_REGION="UNKNOWN"
                     RAW_ALIAS="$RAW_NODE"
                     RAW_OTA="false"
+                    RAW_PSK=""
                 fi
                 
                 CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
@@ -359,7 +396,18 @@ while true; do
                     continue
                 fi
 
-                db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA';"
+                # [V2 安全修复] 校验并入库每节点独立 PSK；无 PSK 或格式非法的节点只登记档案、拒绝指令下发
+                AGENT_PSK=$(echo "$RAW_PSK" | tr -cd '0-9a-fA-F' | cut -c 1-64)
+                if [ ${#AGENT_PSK} -ne 64 ]; then
+                    AGENT_PSK=""
+                fi
+
+                if [ -n "$AGENT_PSK" ]; then
+                    db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota, psk) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA', '$AGENT_PSK') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA', psk='$AGENT_PSK';"
+                else
+                    db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA';"
+                    send_msg "$CHAT_ID" "⚠️ **安全提示**：节点 \`$NODE_ALIAS\` 注册载荷不含独立 PSK (老版本 Agent)。\n仅登记档案，指令下发已被拒绝；请尽快升级该节点以启用每节点密钥。"
+                fi
                 
                 FMT_AGENT_IP=$(echo "$AGENT_IP" | tr '_' ',')
                 MAIN_SHOW_IP=$(echo "$FMT_AGENT_IP" | cut -d',' -f1)
@@ -450,26 +498,26 @@ while true; do
                     ;;
 
                 do_reconfig:*)
-                    echo "[$(date '+%H:%M:%S')] RC_STEP0 ENTER CHAT_ID=$CHAT_ID INPUT_LEN=${#TEXT}" >> /tmp/reconfig_debug.log
+                    echo "[$(date '+%H:%M:%S')] RC_STEP0 ENTER CHAT_ID=$CHAT_ID INPUT_LEN=${#TEXT}" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                     RECONFIG_INPUT=$(echo "${TEXT#*:}" | tr -s ' ' | sed 's/^ //; s/ $//')
                     CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
                     
                     NEW_TOKEN=$(echo "$RECONFIG_INPUT" | awk '{print $1}')
                     NEW_CHAT_ID=$(echo "$RECONFIG_INPUT" | awk '{print $2}')
-                    echo "[$(date '+%H:%M:%S')] RC_STEP1 PARSED TOKEN_LEN=${#NEW_TOKEN} CHATID=[$NEW_CHAT_ID]" >> /tmp/reconfig_debug.log
+                    echo "[$(date '+%H:%M:%S')] RC_STEP1 PARSED TOKEN_LEN=${#NEW_TOKEN} CHATID=[$NEW_CHAT_ID]" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                     
                     # [格式清洗] 强校验凭证形态
                     if ! [[ "$NEW_TOKEN" =~ ^[0-9]{6,}:[A-Za-z0-9_-]{30,}$ ]] || ! [[ "$NEW_CHAT_ID" =~ ^-?[0-9]{5,}$ ]]; then
-                        echo "[$(date '+%H:%M:%S')] RC_STEP2 FORMAT_FAIL" >> /tmp/reconfig_debug.log
+                        echo "[$(date '+%H:%M:%S')] RC_STEP2 FORMAT_FAIL" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                         render_msg "$CHAT_ID" "$MSG_ID" "⛔ **凭证格式校验失败**%0AToken 形如 \`123456789:AAH...\`，Chat ID 为纯数字。请重新回复。"
                         continue
                     fi
                     
                     # [步骤 0] Master 端先 getMe 验证新 Token，手误凭证在此拦截，不浪费全舰队流量
                     render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在验证新 Bot Token 有效性..."
-                    echo "[$(date '+%H:%M:%S')] RC_STEP3 GETME_START" >> /tmp/reconfig_debug.log
+                    echo "[$(date '+%H:%M:%S')] RC_STEP3 GETME_START" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                     ME_RESULT=$(curl -s --connect-timeout 5 -m 10 "https://api.telegram.org/bot${NEW_TOKEN}/getMe")
-                    echo "[$(date '+%H:%M:%S')] RC_STEP4 GETME_DONE resp=${ME_RESULT:0:120}" >> /tmp/reconfig_debug.log
+                    echo "[$(date '+%H:%M:%S')] RC_STEP4 GETME_DONE resp=${ME_RESULT:0:120}" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                     if ! echo "$ME_RESULT" | grep -q '"ok":true'; then
                         render_msg "$CHAT_ID" "$MSG_ID" "❌ **新 Token 验证失败**%0A$(echo "$ME_RESULT" | jq -r '.description // .error_code' 2>/dev/null)%0A凭证未下发，请重新填写。"
                         continue
@@ -477,7 +525,7 @@ while true; do
                     NEW_BOT_NAME=$(echo "$ME_RESULT" | jq -r '.result.username // "未知"' 2>/dev/null)
                     
                     NODE_DATA=$(db_exec "SELECT node_name, agent_ip, agent_port FROM nodes WHERE chat_id='$CHAT_ID' AND enable_ota='true';")
-                    echo "[$(date '+%H:%M:%S')] RC_STEP5 NODES_FOUND=$(echo "$NODE_DATA" | grep -c '|')" >> /tmp/reconfig_debug.log
+                    echo "[$(date '+%H:%M:%S')] RC_STEP5 NODES_FOUND=$(echo "$NODE_DATA" | grep -c '|')" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                     if [ -z "$NODE_DATA" ]; then
                         render_msg "$CHAT_ID" "$MSG_ID" "⚠️ 您名下暂无开启 OTA 权限的记录节点，无需切换。"
                         continue
@@ -495,9 +543,9 @@ while true; do
                     
                     while IFS='|' read -r NNAME AIP APORT; do
                         [ -z "$NNAME" ] && continue
-                        echo "[$(date '+%H:%M:%S')] RC_STEP6 CALL $NNAME ($AIP:$APORT)" >> /tmp/reconfig_debug.log
-                        RESPONSE=$(call_agent "$AIP" "$APORT" "/trigger_reconfig" "b64=${RECONFIG_B64}")
-                        echo "[$(date '+%H:%M:%S')] RC_STEP7 RESP $NNAME => ${RESPONSE:0:80}" >> /tmp/reconfig_debug.log
+                        echo "[$(date '+%H:%M:%S')] RC_STEP6 CALL $NNAME ($AIP:$APORT)" >> "${MASTER_DIR}/logs/reconfig_debug.log"
+                        RESPONSE=$(call_agent "$NNAME" "$AIP" "$APORT" "/trigger_reconfig" "b64=${RECONFIG_B64}")
+                        echo "[$(date '+%H:%M:%S')] RC_STEP7 RESP $NNAME => ${RESPONSE:0:80}" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                         if [[ "$RESPONSE" == *"Action Accepted"* ]]; then
                             SUCCESS_COUNT=$((SUCCESS_COUNT+1))
                         else
@@ -506,7 +554,7 @@ while true; do
                         sleep 1.2
                     done <<< "$NODE_DATA"
                     
-                    echo "[$(date '+%H:%M:%S')] RC_STEP8 SUMMARY success=$SUCCESS_COUNT/$TOTAL_COUNT" >> /tmp/reconfig_debug.log
+                    echo "[$(date '+%H:%M:%S')] RC_STEP8 SUMMARY success=$SUCCESS_COUNT/$TOTAL_COUNT" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                     
                     if [ -z "$FAIL_LIST" ]; then
                         SUMMARY="✅ **全舰队切换完成**%0A成功: ${SUCCESS_COUNT}/${TOTAL_COUNT} 台%0A%0A📋 **后续操作清单**:%0A1. 前往新 Bot 查看注册回执 (各节点已自动发送)。%0A2. 在新机器上部署新司令部 (或直接迁移本库)。%0A3. 确认新司令部接管后，**停止旧司令部的 tg_master 进程**。"
@@ -524,7 +572,7 @@ while true; do
                     else
                         render_msg "$CHAT_ID" "$MSG_ID" "📢 **司令部指令下达：正在唤醒全舰队执行 OTA 升级...**%0A*(节点升级成功后会主动发回新的入库确认，请注意查收)*"
                         echo "$NODE_DATA" | while IFS='|' read -r NNAME AIP APORT; do
-                            call_agent "$AIP" "$APORT" "/trigger_ota" "" > /dev/null &
+                            call_agent "$NNAME" "$AIP" "$APORT" "/trigger_ota" "" > /dev/null &
                             sleep 0.3
                         done
                     fi
@@ -544,21 +592,24 @@ while true; do
                     fi
                     render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在下载重构图纸，司令部即将进入静默重启..."
 
-                    curl -fsSL "${REPO_RAW_URL}/master/install_master.sh" -o "/tmp/install_master.sh"
-                    
-                    if ! bash -n "/tmp/install_master.sh" >/dev/null 2>&1; then
+                    # [V5 安全修复] mktemp 私有路径替代可预测的 /tmp/install_master.sh
+                    MASTER_OTA_SCRIPT=$(mktemp "${MASTER_DIR}/ota_install.XXXXXX.sh")
+                    curl -fsSL "${REPO_RAW_URL}/master/install_master.sh" -o "$MASTER_OTA_SCRIPT"
+
+                    if ! bash -n "$MASTER_OTA_SCRIPT" >/dev/null 2>&1; then
                         send_msg "$CHAT_ID" "❌ OTA 传输受损：脚本下载不完整，已触发防砖熔断，升级取消！"
+                        rm -f "$MASTER_OTA_SCRIPT"
                         continue
                     fi
-                    
-                    chmod +x "/tmp/install_master.sh"
-                    
+
+                    chmod 700 "$MASTER_OTA_SCRIPT"
+
                     if command -v systemd-run >/dev/null 2>&1; then
-                        systemd-run --quiet --no-block /bin/bash -c "export SILENT_MASTER_OTA='true'; export OTA_CHAT_ID='$CHAT_ID'; bash /tmp/install_master.sh"
+                        systemd-run --quiet --no-block /bin/bash -c "export SILENT_MASTER_OTA='true'; export OTA_CHAT_ID='$CHAT_ID'; bash '$MASTER_OTA_SCRIPT'"
                     else
                         export SILENT_MASTER_OTA="true"
                         export OTA_CHAT_ID="$CHAT_ID"
-                        nohup bash /tmp/install_master.sh >/dev/null 2>&1 & disown
+                        nohup bash "$MASTER_OTA_SCRIPT" >/dev/null 2>&1 & disown
                     fi
                     sleep 10
                     ;;
@@ -570,7 +621,7 @@ while true; do
                     else
                         render_msg "$CHAT_ID" "$MSG_ID" "📢 **司令部指令下达：正在召唤所有哨兵回传简报...**%0A*(为防止触发 TG 官方限流，简报将排队依次送达，请耐心等待)*"
                         echo "$NODE_DATA" | while IFS='|' read -r NNAME AIP APORT; do
-                            call_agent "$AIP" "$APORT" "/trigger_report" "" > /dev/null &
+                            call_agent "$NNAME" "$AIP" "$APORT" "/trigger_report" "" > /dev/null &
                             sleep 2  
                         done
                     fi
@@ -583,7 +634,7 @@ while true; do
                     else
                         render_msg "$CHAT_ID" "$MSG_ID" "📢 **司令部指令下达：正在唤醒所有哨兵执行系统维护...**"
                         echo "$NODE_DATA" | while IFS='|' read -r NNAME AIP APORT; do
-                            call_agent "$AIP" "$APORT" "/trigger_run" "" > /dev/null &
+                            call_agent "$NNAME" "$AIP" "$APORT" "/trigger_run" "" > /dev/null &
                             sleep 0.2  
                         done
                     fi
@@ -604,7 +655,7 @@ while true; do
                         if [ -n "$AGENT_IP" ] && [ -n "$AGENT_PORT" ]; then
                             render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在向 \`$TARGET_NODE\` ($AGENT_IP) 下发 [quality] 指令，请稍候..."
                             
-                            RESPONSE=$(call_agent "$AGENT_IP" "$AGENT_PORT" "/trigger_quality" "")
+                            RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_quality" "")
                             
                             if [ "$RESPONSE" == "FAILED" ]; then
                                 send_msg "$CHAT_ID" "❌ 指令下发超时或失败！请检查节点公网 IP 或防火墙端口 ($AGENT_PORT) 是否放行。"
@@ -760,7 +811,7 @@ while true; do
                     AGENT_PORT=$(echo "$AGENT_INFO" | cut -d'|' -f2)
                     
                     if [ -n "$AGENT_IP" ] && [ -n "$AGENT_PORT" ]; then
-                        RESPONSE=$(call_agent "$AGENT_IP" "$AGENT_PORT" "/trigger_toggle" "mod=${MOD_NAME}&state=${TARGET_STATE}")
+                        RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_toggle" "mod=${MOD_NAME}&state=${TARGET_STATE}")
                         
                         if [[ "$RESPONSE" == *"Action Accepted"* ]]; then
                             db_exec "UPDATE nodes SET enable_${MOD_NAME}='$TARGET_STATE' WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE';"
@@ -864,7 +915,7 @@ while true; do
                         render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在向 \`$TARGET_NODE\` 下发重命名指令，正在建立加密隧道..."
                         
                         ALIAS_B64=$(echo -n "$NEW_ALIAS" | base64 | tr -d '\n' | tr '+/' '-_')
-                        RESPONSE=$(call_agent "$AGENT_IP" "$AGENT_PORT" "/trigger_rename" "b64=${ALIAS_B64}")
+                        RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_rename" "b64=${ALIAS_B64}")
                         
                         if [ "$RESPONSE" == "FAILED" ]; then
                             send_msg "$CHAT_ID" "❌ 指令下发超时！为防范劫持风险，已终止请求。"
@@ -896,7 +947,7 @@ while true; do
                     if [ -n "$AGENT_IP" ] && [ -n "$AGENT_PORT" ]; then
                         render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在向 \`$TARGET_NODE\` 发送 OTA 触发报文..."
                         
-                        RESPONSE=$(call_agent "$AGENT_IP" "$AGENT_PORT" "/trigger_ota" "")
+                        RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_ota" "")
                         
                         if [ "$RESPONSE" == "FAILED" ]; then
                             send_msg "$CHAT_ID" "❌ OTA 指令下发彻底失败！链路异常或严禁使用 HTTP 降级通讯。"
@@ -922,7 +973,7 @@ while true; do
                     if [ -n "$AGENT_IP" ] && [ -n "$AGENT_PORT" ]; then
                         render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在向 \`$TARGET_NODE\` ($AGENT_IP) 下发 [$ACTION_TYPE] 指令，请稍候..."
                         
-                        RESPONSE=$(call_agent "$AGENT_IP" "$AGENT_PORT" "/trigger_${ACTION_TYPE}" "")
+                        RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_${ACTION_TYPE}" "")
                         
                         if [ "$RESPONSE" == "FAILED" ]; then
                             send_msg "$CHAT_ID" "❌ 指令下发超时或失败！为保护链路安全，已终止通信 (严禁降级为 HTTP)。"
