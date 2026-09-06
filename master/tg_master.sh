@@ -220,11 +220,14 @@ db_exec "ALTER TABLE nodes ADD COLUMN node_alias TEXT;" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_google TEXT DEFAULT 'true';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_trust TEXT DEFAULT 'true';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN enable_ota TEXT DEFAULT 'false';" 2>/dev/null
-# [V2 安全修复] 每节点独立 PSK 与 TOFU 证书指纹列；[引擎配套] SSH 隧道出口列
+# [V2 安全修复] 每节点独立 PSK 与 TOFU 证书指纹列；[引擎配套] SSH 隧道出口列；[persona] 区域参数列
 db_exec "ALTER TABLE nodes ADD COLUMN psk TEXT;" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN cert_fp TEXT;" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN ssh_port TEXT DEFAULT '22';" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN tunnel_user TEXT DEFAULT 'sentinel-tunnel';" 2>/dev/null
+db_exec "ALTER TABLE nodes ADD COLUMN lang_params TEXT;" 2>/dev/null
+db_exec "ALTER TABLE nodes ADD COLUMN base_lat TEXT;" 2>/dev/null
+db_exec "ALTER TABLE nodes ADD COLUMN base_lon TEXT;" 2>/dev/null
 
 db_exec "CREATE TABLE IF NOT EXISTS ip_trend_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -362,7 +365,17 @@ while true; do
                 fi
                 
                 FIELD_COUNT=$(echo "$REG_LINE" | awk -F'|' '{print NF}')
-                if [ "$FIELD_COUNT" -ge 10 ]; then
+                # 字段 11-13: LANG_PARAMS/BASE_LAT/BASE_LON (引擎 persona 数据)
+                RAW_LANG_PARAMS=""
+                RAW_BASE_LAT=""
+                RAW_BASE_LON=""
+                if [ "$FIELD_COUNT" -ge 13 ]; then
+                    IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK RAW_SSH_PORT RAW_TUNNEL_USER RAW_LANG_PARAMS RAW_BASE_LAT RAW_BASE_LON <<< "$REG_LINE"
+                elif [ "$FIELD_COUNT" -eq 12 ]; then
+                    IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK RAW_SSH_PORT RAW_TUNNEL_USER RAW_LANG_PARAMS RAW_BASE_LAT <<< "$REG_LINE"
+                elif [ "$FIELD_COUNT" -eq 11 ]; then
+                    IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK RAW_SSH_PORT RAW_TUNNEL_USER RAW_LANG_PARAMS <<< "$REG_LINE"
+                elif [ "$FIELD_COUNT" -eq 10 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK RAW_SSH_PORT RAW_TUNNEL_USER <<< "$REG_LINE"
                 elif [ "$FIELD_COUNT" -eq 9 ]; then
                     IFS='|' read -r MAGIC RAW_REGION RAW_NODE RAW_IP RAW_PORT RAW_ALIAS RAW_OTA RAW_PSK RAW_SSH_PORT <<< "$REG_LINE"
@@ -432,8 +445,13 @@ while true; do
                 AGENT_TUNNEL_USER=$(echo "$RAW_TUNNEL_USER" | tr -cd 'a-zA-Z0-9_-')
                 [ -z "$AGENT_TUNNEL_USER" ] && AGENT_TUNNEL_USER="sentinel-tunnel"
 
+                # [引擎 persona] 区域参数清洗 (hl=xx&gl=XX / 十进制坐标)
+                AGENT_LANG_PARAMS=$(echo "$RAW_LANG_PARAMS" | tr -cd 'a-zA-Z0-9=&_-' | cut -c 1-40)
+                AGENT_BASE_LAT=$(echo "$RAW_BASE_LAT" | tr -cd '0-9.-' | cut -c 1-12)
+                AGENT_BASE_LON=$(echo "$RAW_BASE_LON" | tr -cd '0-9.-' | cut -c 1-13)
+
                 if [ -n "$AGENT_PSK" ]; then
-                    db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota, psk, ssh_port, tunnel_user) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA', '$AGENT_PSK', '$AGENT_SSH_PORT', '$AGENT_TUNNEL_USER') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA', psk='$AGENT_PSK', ssh_port='$AGENT_SSH_PORT', tunnel_user='$AGENT_TUNNEL_USER';"
+                    db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota, psk, ssh_port, tunnel_user, lang_params, base_lat, base_lon) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA', '$AGENT_PSK', '$AGENT_SSH_PORT', '$AGENT_TUNNEL_USER', '$AGENT_LANG_PARAMS', '$AGENT_BASE_LAT', '$AGENT_BASE_LON') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA', psk='$AGENT_PSK', ssh_port='$AGENT_SSH_PORT', tunnel_user='$AGENT_TUNNEL_USER', lang_params=COALESCE(NULLIF(excluded.lang_params,''), lang_params), base_lat=COALESCE(NULLIF(excluded.base_lat,''), base_lat), base_lon=COALESCE(NULLIF(excluded.base_lon,''), base_lon);"
                 else
                     db_exec "INSERT INTO nodes (chat_id, node_name, agent_ip, agent_port, last_seen, region, node_alias, enable_ota) VALUES ('$CHAT_ID', '$NODE_NAME', '$AGENT_IP', '$AGENT_PORT', CURRENT_TIMESTAMP, '$AGENT_REGION', '$NODE_ALIAS', '$AGENT_OTA') ON CONFLICT(chat_id, node_name) DO UPDATE SET agent_ip='$AGENT_IP', agent_port='$AGENT_PORT', last_seen=CURRENT_TIMESTAMP, region='$AGENT_REGION', node_alias='$NODE_ALIAS', enable_ota='$AGENT_OTA';"
                     send_msg "$CHAT_ID" "⚠️ **安全提示**：节点 \`$NODE_ALIAS\` 注册载荷不含独立 PSK (老版本 Agent)。\n仅登记档案，指令下发已被拒绝；请尽快升级该节点以启用每节点密钥。"

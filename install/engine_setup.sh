@@ -61,28 +61,11 @@ do_engine_setup() {
     done
     chmod +x "${MASTER_DIR}/engine/tunnel_manager.sh" "${MASTER_DIR}/engine/scheduler.sh" 2>/dev/null
 
-    # ---------- 4. 引擎数据 (区域模板/关键词/时区表) ----------
+    # ---------- 4. 引擎数据 ----------
+    # 时区表 (persona 用); 区域模板/关键词/坐标由注册报文携带 + 调度器按需拉取,
+    # 不在装机时点拉取 (Master 先装、节点后注册,装机时 DB 为空)
     curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/timezones.json?t=$(date +%s)" \
         -o "${MASTER_DIR}/data/timezones.json" 2>/dev/null || true
-
-    # 区域模板与关键词: 仅拉取 DB 中已注册节点的区域 (按需)
-    ENGINE_REGIONS=$(printf ".timeout 5000\nSELECT DISTINCT region FROM nodes WHERE region IS NOT NULL AND region != 'UNKNOWN';\n" | sqlite3 "${DB_FILE}" 2>/dev/null)
-    for reg in $ENGINE_REGIONS; do
-        [ -z "$reg" ] && continue
-        mkdir -p "${MASTER_DIR}/data/regions/${reg}" "${MASTER_DIR}/data/keywords"
-        # 该区域全部州/市模板 (tar 太重,用 GitHub API 列文件逐个拉;区域文件量小)
-        curl -fsSL --connect-timeout 10 --retry 2 \
-            "https://api.github.com/repos/jasper-khan/IP-Sentinel/contents/data/regions/${reg}?ref=main" 2>/dev/null \
-            | grep -o '"path": "data/regions/[^"]*"' | cut -d'"' -f4 | while read -r rpath; do
-            if echo "$rpath" | grep -q '\.json$'; then
-                mkdir -p "${MASTER_DIR}/$(dirname "$rpath")"
-                curl -fsSL --connect-timeout 10 --retry 2 "${REPO_RAW_URL}/${rpath}" \
-                    -o "${MASTER_DIR}/${rpath}" 2>/dev/null || true
-            fi
-        done
-        curl -fsSL --connect-timeout 10 --retry 2 "${REPO_RAW_URL}/data/keywords/kw_${reg}.txt?t=$(date +%s)" \
-            -o "${MASTER_DIR}/data/keywords/kw_${reg}.txt" 2>/dev/null || true
-    done
 
     # ---------- 5. systemd 守护 ----------
     if is_systemd; then

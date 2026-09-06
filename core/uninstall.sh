@@ -153,6 +153,16 @@ fi
 # [物理销毁] 抹杀持久化特征，销毁系统沙盒痕迹
 # ----------------------------------------------------------
 echo "[5/5] 正在抹除核心程序、配置文件与系统痕迹..."
+
+# [引擎配套] 撤销浏览器引擎隧道账户 (仅转发账户,无数据)
+TUNNEL_USER="sentinel-tunnel"
+if id "$TUNNEL_USER" >/dev/null 2>&1; then
+    pkill -u "$TUNNEL_USER" -f "sshd" >/dev/null 2>&1 || true
+    userdel "$TUNNEL_USER" >/dev/null 2>&1 || true
+    rm -rf "/home/${TUNNEL_USER}" 2>/dev/null
+    echo -e " ✅ \033[32m引擎隧道账户 ${TUNNEL_USER} 已移除。\033[0m"
+fi
+
 if [ -d "$INSTALL_DIR" ]; then
     rm -rf "$INSTALL_DIR"
 fi

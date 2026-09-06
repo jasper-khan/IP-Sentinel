@@ -44,6 +44,10 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl kill --signal=SIGKILL ip-sentinel-master.service >/dev/null 2>&1 || true
     systemctl disable --now ip-sentinel-master.service >/dev/null 2>&1
     rm -f /etc/systemd/system/ip-sentinel-master.service
+    # [引擎配套] 停止并抹除浏览器引擎双守护 (隧道池 + 会话调度)
+    systemctl kill --signal=SIGKILL ip-sentinel-tunnels.service ip-sentinel-engine.service >/dev/null 2>&1 || true
+    systemctl disable --now ip-sentinel-tunnels.service ip-sentinel-engine.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/ip-sentinel-tunnels.service /etc/systemd/system/ip-sentinel-engine.service
     systemctl daemon-reload
     systemctl reset-failed
 else
@@ -55,6 +59,10 @@ fi
 # ----------------------------------------------------------
 echo "[2/4] 正在终止后台中枢调度进程..."
 pkill -9 -f "tg_master.sh" >/dev/null 2>&1 || true
+# [引擎配套] 镇压浏览器引擎残留进程 (调度器/隧道/会话)
+pkill -9 -f "engine/scheduler.sh" >/dev/null 2>&1 || true
+pkill -9 -f "engine/tunnel_manager.sh" >/dev/null 2>&1 || true
+pkill -9 -f "camoufox_session.py" >/dev/null 2>&1 || true
 
 # ----------------------------------------------------------
 # [任务清洗] 基于内存管道流彻底擦除系统底层看门狗劫持

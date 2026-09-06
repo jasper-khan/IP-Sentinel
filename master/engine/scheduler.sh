@@ -19,12 +19,14 @@ VENV_PY="${MASTER_DIR}/venv/bin/python3"
 LOG_FILE="${MASTER_DIR}/logs/engine.log"
 STATE_DIR="${MASTER_DIR}/.engine_state"
 PORT_MAP_FILE="${MASTER_DIR}/.tunnel_ports"
+KEYWORDS_DIR="${MASTER_DIR}/data/keywords"
+REPO_RAW_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
 
 ENGINE_CONCURRENCY="${ENGINE_CONCURRENCY:-2}"
 ENGINE_MIN_INTERVAL="${ENGINE_MIN_INTERVAL:-5400}"
 SESSION_TIMEOUT=1800
 
-mkdir -p "${STATE_DIR}" "${MASTER_DIR}/logs"
+mkdir -p "${STATE_DIR}" "${MASTER_DIR}/logs" "${KEYWORDS_DIR}"
 
 log() {
     echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [Schedul] $*" >> "$LOG_FILE"
@@ -32,6 +34,15 @@ log() {
 
 db_exec() {
     printf ".timeout 5000\n%s\n" "$1" | sqlite3 "$DB_FILE"
+}
+
+# [persona 配套] 节点区域关键词缺失时按需拉取 (数据文件,非执行内容)
+ensure_keywords() {
+    local region="$1"
+    local kw_file="${KEYWORDS_DIR}/kw_${region}.txt"
+    [ -s "$kw_file" ] && return 0
+    curl -fsSL --connect-timeout 10 --retry 2 "${REPO_RAW_URL}/data/keywords/kw_${region}.txt" \
+        -o "$kw_file" 2>/dev/null || { rm -f "$kw_file"; log "WARN kw_${region}.txt 拉取失败,会话将无关键词"; }
 }
 
 # 节点端口查询 (隧道管理器维护的持久映射)
@@ -50,22 +61,29 @@ node_running() {
 }
 
 launch_session() {
-    local n="$1" region="$2"
+    local n="$1" region="$2" lang_params="$3" lat="$4" lon="$5"
     local port
     port=$(node_port "$n")
 
-    log "节点 ${n} 进入会话 (region=${region}, proxy=${port:-local})"
+    ensure_keywords "$region"
+
+    log "节点 ${n} 进入会话 (region=${region}, persona=${lang_params:-default} @(${lat:-?},${lon:-?}), proxy=${port:-local})"
+
+    local extra_args=()
+    [ -n "$lang_params" ] && extra_args+=(--lang-params "$lang_params")
+    [ -n "$lat" ] && extra_args+=(--lat "$lat")
+    [ -n "$lon" ] && extra_args+=(--lon "$lon")
 
     (
         if [ -n "$port" ]; then
             timeout --signal=TERM "$SESSION_TIMEOUT" \
                 "${VENV_PY}" "${ENGINE_DIR}/camoufox_session.py" \
-                --node "$n" --region "$region" --socks-port "$port" >> /dev/null 2>&1
+                --node "$n" --region "$region" --socks-port "$port" "${extra_args[@]}" >> /dev/null 2>&1
         else
             # 无端口映射: 同机节点 (Master=Agent 同装) 或隧道未就绪——本机出口
             timeout --signal=TERM "$SESSION_TIMEOUT" \
                 "${VENV_PY}" "${ENGINE_DIR}/camoufox_session.py" \
-                --node "$n" --region "$region" --socks-port 0 >> /dev/null 2>&1
+                --node "$n" --region "$region" --socks-port 0 "${extra_args[@]}" >> /dev/null 2>&1
         fi
         RC=$?
         echo "$(date +%s)" > "${STATE_DIR}/${n}.last"
@@ -89,9 +107,9 @@ while true; do
     SLOTS=$((ENGINE_CONCURRENCY - ACTIVE))
 
     if [ "$SLOTS" -gt 0 ]; then
-        NODES=$(db_exec "SELECT node_name, region FROM nodes WHERE psk IS NOT NULL AND psk != '' ORDER BY last_seen DESC;")
+        NODES=$(db_exec "SELECT node_name, region, IFNULL(lang_params,''), IFNULL(base_lat,''), IFNULL(base_lon,'') FROM nodes WHERE psk IS NOT NULL AND psk != '' ORDER BY last_seen DESC;")
 
-        while IFS='|' read -r n region; do
+        while IFS='|' read -r n region lang_params lat lon; do
             [ -z "$n" ] && continue
             [ "$SLOTS" -le 0 ] && break
             region="${region:-US}"
@@ -109,7 +127,7 @@ while true; do
                 continue
             fi
 
-            launch_session "$n" "$region"
+            launch_session "$n" "$region" "$lang_params" "$lat" "$lon"
             SLOTS=$((SLOTS - 1))
         done <<< "$NODES"
     fi

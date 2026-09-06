@@ -1,5 +1,20 @@
 # Changelog
 
+## [v4.6.0-fork] - 2026-09-06
+
+### 🐛 Bug Fixes
+
+- **【关键】引擎 persona 数据流修复** — 原实现依赖 Master 装机时拉取已注册节点的区域模板,但 Master 先装、节点后注册(装机时 DB 为空),引擎将回退到错误默认 persona。现改为: 注册报文携带 `LANG_PARAMS/BASE_LAT/BASE_LON`(节点装机时选定的城市坐标与语言),Master 入库,调度器直传会话引擎;关键词由调度器按需拉取;装机时点不再拉区域模板
+
+### ✨ Features
+
+- **本地 curl 养护模式选择** — Agent 装机新增 [3.1/7]: 引擎代管(默认,本地 curl 模块关闭且不再部署 20 分钟 runner 巡逻)或本地经典模式;`mod_quality` 质量探测与 TG 报表在两种模式下均保留
+
+### 🔧 Improvements
+
+- **卸载完整化** — Agent 卸载移除 `sentinel-tunnel` 隧道账户及家目录;Master 卸载停止/抹除引擎双守护 (tunnels/engine) 并镇压残留引擎进程
+- **隧道账户防锁定** — `usermod -p '*'` 规避 useradd 默认 `!` 密码字段导致的 sshd 锁定账户边缘拒绝
+
 ## [v4.5.2-fork] - 2026-09-06
 
 ### ✨ Features

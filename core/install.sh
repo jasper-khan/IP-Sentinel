@@ -267,7 +267,7 @@ else
         fi
 
         # 组装注册指令
-        REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}|${SSH_PORT}|${TUNNEL_USER}"
+        REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}|${SSH_PORT}|${TUNNEL_USER}|${LANG_PARAMS}|${BASE_LAT}|${BASE_LON}"
 
         echo -e "\n📤 正在向 Telegram 推送注册指令..."
         TEXT_MSG="✨ *IP-Sentinel 重新发送注册指令！*
@@ -447,9 +447,22 @@ if [ "$UPGRADE_MODE" == "false" ]; then
     mkdir -p "${INSTALL_DIR}/data/regions/${COUNTRY_ID}/${STATE_ID}"
     mkdir -p "${INSTALL_DIR}/logs"
 
-    echo -e "\n[3/7] 正在初始化养护模块 (默认全量部署，支持 TG 远程动态启停)..."
-    ENABLE_GOOGLE="true"
-    ENABLE_TRUST="true"
+    echo -e "\n[3/7] 正在初始化养护模块 (支持 TG 远程动态启停)..."
+    echo -e "\033[36m[3.1/7] 本机养护引擎选择:\033[0m"
+    echo "  1) 🤖 由 Master 浏览器引擎代管 (推荐: Master 装有 Camoufox 引擎时)"
+    echo "     —— 本地 curl 养护关闭,流量由 Master 经 SSH 隧道以真浏览器执行"
+    echo "  2) 🔄 本地 curl 养护 (经典模式: 每 20 分钟本机执行,无引擎依赖)"
+    read -p "请输入选择 [1-2] (默认1): " ENGINE_MODE_CHOICE
+    ENGINE_MODE_CHOICE=${ENGINE_MODE_CHOICE:-1}
+    if [ "$ENGINE_MODE_CHOICE" == "1" ]; then
+        ENABLE_GOOGLE="false"
+        ENABLE_TRUST="false"
+        echo -e "✅ \033[32m已选择引擎代管: 本地 curl 养护关闭 (mod_quality 质量探测与 TG 报表保留)。\033[0m"
+    else
+        ENABLE_GOOGLE="true"
+        ENABLE_TRUST="true"
+        echo -e "✅ \033[32m已选择本地养护: 每 20 分钟本机 curl 巡逻。\033[0m"
+    fi
 
     echo -e "\n[4/7] 是否接入 Master 司令部进行远程联控？ (y/n)"
     read -p "请输入选择 [y/n] (默认n): " TG_CHOICE
@@ -536,6 +549,9 @@ if [ "$UPGRADE_MODE" == "false" ]; then
                     || useradd -r -M -s /sbin/nologin "$TUNNEL_USER" 2>/dev/null \
                     || true
             fi
+            # useradd 默认密码字段为 '!' (锁定),部分 sshd/PAM 组合会拒绝锁定账户的密钥认证;
+            # 置 '*' 表示"无密码但未锁定"
+            usermod -p '*' "$TUNNEL_USER" 2>/dev/null || true
             TUNNEL_SSH_DIR="/home/${TUNNEL_USER}/.ssh"
             [ -d "$TUNNEL_SSH_DIR" ] || { mkdir -p "$TUNNEL_SSH_DIR" && chown "$TUNNEL_USER":"$TUNNEL_USER" "$TUNNEL_SSH_DIR" && chmod 700 "$TUNNEL_SSH_DIR"; }
             # 限制: 禁 pty/X11/agent 转发,禁 shell (command=/bin/false),来源限定 Master
@@ -1001,7 +1017,13 @@ echo $(date -u +%s) > "${INSTALL_DIR}/core/.ua_last_update"
 
 if is_systemd; then
     echo "💡 检测到 Systemd 环境，正在部署原生守护服务..."
-    
+
+    # [引擎代管模式] 本地 curl 模块全关时,不部署 20 分钟 runner 巡逻 (养护由 Master 引擎执行)
+    if [ "$ENABLE_GOOGLE" != "true" ] && [ "$ENABLE_TRUST" != "true" ]; then
+        echo "🤖 引擎代管模式: 跳过本地 runner.timer 部署 (养护由 Master 浏览器引擎执行)"
+        rm -f /etc/systemd/system/ip-sentinel-runner.service /etc/systemd/system/ip-sentinel-runner.timer
+        systemctl disable --now ip-sentinel-runner.timer >/dev/null 2>&1 || true
+    else
     cat > /etc/systemd/system/ip-sentinel-runner.service << EOF
 [Unit]
 Description=IP-Sentinel Runner Service
@@ -1027,6 +1049,7 @@ Unit=ip-sentinel-runner.service
 [Install]
 WantedBy=timers.target
 EOF
+    fi
 
     cat > /etc/systemd/system/ip-sentinel-updater.service << EOF
 [Unit]
@@ -1054,7 +1077,9 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now ip-sentinel-runner.timer ip-sentinel-updater.timer
+    # runner.timer 仅在本地养护模式下存在 (引擎代管模式已跳过生成)
+    systemctl enable --now ip-sentinel-runner.timer >/dev/null 2>&1 || true
+    systemctl enable --now ip-sentinel-updater.timer
 
     if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
         cat > /etc/systemd/system/ip-sentinel-report.service << EOF
@@ -1162,7 +1187,10 @@ EOF
             
         else
             crontab -l 2>/dev/null | grep -v "ip_sentinel" > "${SECURE_TMP}/cron_backup" || true
-            echo "*/20 * * * * ${INSTALL_DIR}/core/runner.sh >/dev/null 2>&1" >> "${SECURE_TMP}/cron_backup"
+            # [引擎代管模式] 本地模块全关时不部署 20 分钟 runner 巡逻
+            if [ "$ENABLE_GOOGLE" == "true" ] || [ "$ENABLE_TRUST" == "true" ]; then
+                echo "*/20 * * * * ${INSTALL_DIR}/core/runner.sh >/dev/null 2>&1" >> "${SECURE_TMP}/cron_backup"
+            fi
             echo "${DEPLOY_UTC_MIN} ${DEPLOY_UTC_HOUR} * * * ${INSTALL_DIR}/core/updater.sh >/dev/null 2>&1" >> "${SECURE_TMP}/cron_backup"
             
             if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
@@ -1208,7 +1236,7 @@ EOF
 if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
     
     # 注册报文中塞入多宿主弹匣 SAFE_COMM_IP
-    REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${SAFE_COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}|${SSH_PORT}|${TUNNEL_USER}"
+    REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${SAFE_COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}|${SSH_PORT}|${TUNNEL_USER}|${LANG_PARAMS}|${BASE_LAT}|${BASE_LON}"
     
     if [ "$UPGRADE_MODE" == "true" ]; then
         OLD_VERSION=$(grep "^AGENT_VERSION=" "$CONFIG_FILE" | cut -d'"' -f2)

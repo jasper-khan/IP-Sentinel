@@ -62,21 +62,41 @@ def find_region_json(region_code):
     return None
 
 
-def load_persona(region_code, region_json_path):
-    """从区域模板 + 时区表组装 Camoufox persona。"""
+def load_persona(region_code, region_json_path, lang_params=None, lat=None, lon=None):
+    """组装 Camoufox persona。
+
+    优先级: 注册报文携带的 DB 字段 (lang_params/lat/lon,精确到节点装机时
+    选定的城市) > 本地区域模板 json > 默认值。
+    """
+    # DB 字段优先 (来自该节点 Agent 注册时的区域配置)
+    effective_lang = lang_params or ""
+    effective_lat, effective_lon = lat, lon
+
     template = {}
     if region_json_path and os.path.isfile(region_json_path):
         with open(region_json_path, encoding="utf-8") as f:
             template = json.load(f)
 
     google_mod = template.get("google_module", {})
-    lat = float(google_mod.get("base_lat", 0) or 0)
-    lon = float(google_mod.get("base_lon", 0) or 0)
+    if not effective_lang:
+        effective_lang = google_mod.get("lang_params", "")
+    if effective_lat is None:
+        effective_lat = google_mod.get("base_lat", 0) or 0
+    if effective_lon is None:
+        effective_lon = google_mod.get("base_lon", 0) or 0
+
+    try:
+        lat_v = float(effective_lat)
+    except (TypeError, ValueError):
+        lat_v = 0.0
+    try:
+        lon_v = float(effective_lon)
+    except (TypeError, ValueError):
+        lon_v = 0.0
 
     # lang_params "hl=zh-HK&gl=HK" -> locale "zh-HK"
     locale = "en-US"
-    lang_params = google_mod.get("lang_params", "")
-    for kv in lang_params.split("&"):
+    for kv in effective_lang.split("&"):
         if kv.startswith("hl="):
             hl = kv[3:].strip()
             if hl:
@@ -95,8 +115,8 @@ def load_persona(region_code, region_json_path):
     return {
         "locale": locale,
         "timezone": timezone,
-        "lat": lat,
-        "lon": lon,
+        "lat": lat_v,
+        "lon": lon_v,
         "static_urls": static_urls,
     }
 
@@ -296,11 +316,17 @@ def main():
     ap.add_argument("--region", required=True)
     ap.add_argument("--socks-port", type=int, required=True)
     ap.add_argument("--region-json", default=None)
+    ap.add_argument("--lang-params", default=None,
+                    help="注册报文携带的区域参数 (hl=xx&gl=XX),优先于模板")
+    ap.add_argument("--lat", default=None, help="注册报文携带的纬度")
+    ap.add_argument("--lon", default=None, help="注册报文携带的经度")
     args = ap.parse_args()
 
     NODE = args.node
     region_json = args.region_json or find_region_json(args.region)
-    persona = load_persona(args.region, region_json)
+    persona = load_persona(args.region, region_json,
+                           lang_params=args.lang_params,
+                           lat=args.lat, lon=args.lon)
     keywords = load_keywords(args.region)
 
     try:
