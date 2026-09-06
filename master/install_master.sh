@@ -23,6 +23,20 @@ SECURE_TMP=$(mktemp -d /tmp/ips_master_install.XXXXXX)
 REPO_RAW_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
 
 # ----------------------------------------------------------
+# [可用性] CDN 间歇 404 重试函数
+# curl --retry 不重试 404 (视为永久错误), 但 raw.githubusercontent 的
+# 间歇 404 实为瞬时故障 — 必须 shell 级循环 (实测 5 次内必过)
+# ----------------------------------------------------------
+fetch_retry() {
+    local url="$1" out="$2" i
+    for i in 1 2 3 4 5; do
+        curl -fsSL --connect-timeout 10 "${url}" -o "$out" 2>/dev/null && return 0
+        sleep 2
+    done
+    return 1
+}
+
+# ----------------------------------------------------------
 # [核心架构升级] 动态嗅探云端真理之源 (SSOT)
 # ----------------------------------------------------------
 TARGET_VERSION=$( (curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)" || curl -4 -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)") 2>/dev/null | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
@@ -33,16 +47,16 @@ echo -e "\n⏳ 正在拉取 IP-Sentinel Master v${TARGET_VERSION} 安装引擎..
 # ----------------------------------------------------------
 # [V3 安全修复] 供应链完整性门禁 (与 Agent 引导入口同构)
 # ----------------------------------------------------------
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/MANIFEST.sha256?t=$(date +%s)" -o "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null
+fetch_retry "${REPO_RAW_URL}/MANIFEST.sha256?t=$(date +%s)" "${SECURE_TMP}/MANIFEST.sha256"
 
 if [ -s "${SECURE_TMP}/MANIFEST.sha256" ]; then
     MANIFEST_EXPECTED=$(awk '$2 == "install/build_master.sh" {print $1}' "${SECURE_TMP}/MANIFEST.sha256")
 fi
 
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/install/build_master.sh?t=$(date +%s)" -o "${SECURE_TMP}/build_master.sh"
+fetch_retry "${REPO_RAW_URL}/install/build_master.sh?t=$(date +%s)" "${SECURE_TMP}/build_master.sh"
 
 if [ ! -s "${SECURE_TMP}/build_master.sh" ]; then
-    echo -e "\033[31m❌ 致命错误：中枢安装引擎拉取失败！\033[0m"
+    echo -e "\033[31m❌ 致命错误：中枢安装引擎拉取失败！网络阻断或 GitHub Raw 异常。\033[0m"
     exit 1
 fi
 

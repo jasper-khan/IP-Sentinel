@@ -27,15 +27,27 @@ trap 'rm -rf "$SECURE_TMP" 2>/dev/null' EXIT HUP
 REPO_RAW_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
 
 # ----------------------------------------------------------
+# [可用性] CDN 间歇 404 重试 (curl --retry 不重试 404, 须 shell 级循环)
+# ----------------------------------------------------------
+fetch_retry() {
+    local url="$1" out="$2" i
+    for i in 1 2 3 4 5; do
+        curl -fsSL --connect-timeout 10 "${url}" -o "$out" 2>/dev/null && return 0
+        sleep 2
+    done
+    return 1
+}
+
+# ----------------------------------------------------------
 # [V3 供应链门禁] 安装器本体必须与 MANIFEST.sha256 锁定哈希一致
 # ----------------------------------------------------------
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/MANIFEST.sha256?t=$(date +%s)" -o "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null
+fetch_retry "${REPO_RAW_URL}/MANIFEST.sha256?t=$(date +%s)" "${SECURE_TMP}/MANIFEST.sha256"
 
 if [ -s "${SECURE_TMP}/MANIFEST.sha256" ]; then
     MANIFEST_EXPECTED=$(awk '$2 == "core/install.sh" {print $1}' "${SECURE_TMP}/MANIFEST.sha256")
 fi
 
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/install.sh?t=$(date +%s)" -o "${SECURE_TMP}/install_core.sh"
+fetch_retry "${REPO_RAW_URL}/core/install.sh?t=$(date +%s)" "${SECURE_TMP}/install_core.sh"
 
 if [ ! -s "${SECURE_TMP}/install_core.sh" ]; then
     echo -e "\033[31m❌ 致命错误：核心安装引擎拉取失败！网络阻断或 GitHub Raw 异常。\033[0m"
