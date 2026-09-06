@@ -43,11 +43,14 @@ webhook.py 隔离实验台 (fcntl shim + 测试 config):
 ## 阶段 4: E2E 安装
 
 - [x] MANIFEST 供应链门禁 (GATE-PASS) + 篡改检出 (TAMPER-DETECT PASS)
-- [x] Master 首装完成 (引擎 venv/camoufox/tunnel_key/三服务全部就位)
-- [~] Master 凭证二次重装 (第一次 direct_test 残值污染 TG_TOKEN, 已抹净重装中)
-- [ ] Agent 同机安装
-- [ ] 注册入库 (13 字段含 PSK/persona)
-- [ ] PSK 指令链 + TOFU
-- [ ] Camoufox 会话 + 指纹持久化
-- [ ] 区域自检落盘
-- [ ] 升级 / 卸载
+- [x] Master 干净重装: 凭证正确/三服务 active/venv+camoufox+隧道密钥全就位
+- [x] Agent 同机安装: config 13 字段齐(PSK 64hex/US-LA persona/MASTER_EGRESS_IP=127.0.0.1)/探针 vendor 落地/runner 不部署(引擎代管)
+- [x] 修复 bug 4: scheduler active_sessions 多行崩溃 (pgrep -fc 空输出) → 已修+重部署
+- [x] 发现环境冲突: cloudnium 旧机原版 Master 抢占同 token getUpdates (409) → 已停旧机服务
+- [~] 注册入库: 首次注册被旧 Master 吞掉;已重推注册消息(message 1797)等用户转发给 bot
+
+### Agent 安装明细验证
+- config: AGENT_VERSION=5.2.1, REGION=US-LA, AGENT_PORT=36357, NODE_ALIAS=L-test
+- PSK: 64 hex present; SSH_PORT=22; TUNNEL_USER=sentinel-tunnel
+- 服务: agent-daemon active; runner 不存在(✅ 引擎代管); probe vendor+sha 落地
+- sentinel-tunnel 用户不存在(同机未贴公钥,正确)
