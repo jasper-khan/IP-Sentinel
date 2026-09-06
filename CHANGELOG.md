@@ -1,5 +1,22 @@
 # Changelog
 
+## [v4.4.0-fork] - 2026-09-06
+
+### 🔒 Security (安全审计修复)
+
+本版本为 jasper-khan fork 的首个安全加固版本，修复对 main @ af400c8 全量审计发现的 6 项漏洞：
+
+- **V1 (Critical) 探针供应链 RCE** — ip.sh 探针 vendor 进仓库 (`data/probe/`) 并锁定 SHA-256；`mod_quality.sh` 执行前强制哈希门禁；彻底删除运行时第三方下载 (含 `IP.Check.Place` 零校验回退)
+- **V2 (High) 指令通道 PSK 弱密钥** — 每节点独立 256-bit `NODE_PSK` 替代共享低熵 chat_id；401 统一同文响应摧毁爆破预言机；单 IP 限速封禁；TOFU 证书指纹锁定；安装器支持防火墙限源放行
+- **V3 (Medium-High) OTA/安装链无签名** — 新增 `MANIFEST.sha256` 哈希锁定清单 (生成器 `scripts/gen_manifest.sh`)；Agent OTA 与两条安装引导链下载后强制哈希比对，不符熔断
+- **V4 (Medium) 跨节点重放与签名降级** — 移除 V1 降级签名路径；独立 PSK 同时消除跨舰队签名重放
+- **V5 (Low) 可预测 /tmp 路径** — updater/OTA/master OTA 临时文件全部 `mktemp`；runner 锁文件移入安装目录；调试日志移入 `MASTER_DIR/logs` 并限权
+- **V6 (Low) 运行面加固** — 500 响应不再回传内部异常；webhook 并发上限 24 线程
+
+### 🧭 Fork 基础
+
+- 全部数据源/安装源/OTA 源指向本仓库 `jasper-khan/IP-Sentinel`
+
 ## [v4.3.4] - 2026-08-26
 
 ### ✨ Features
