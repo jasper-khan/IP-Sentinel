@@ -56,7 +56,17 @@ webhook.py 隔离实验台 (fcntl shim + 测试 config):
 - [x] 注册入库: 13 字段全验(PSK 64hex/persona US-LA/双栈地址/ssh_port/tunnel_user);旧 Master 吞掉的首注册由人工转发补回
 - [x] **指令链 E2E 全过**: PSK签名指令执行(Action Accepted)/错误PSK 401/重放401/TOFU锁定+不匹配检测/时间窗外401
 - [x] **防火墙限源实测**: 公网 IP 被拦(限源生效),127.0.0.1 放行
-- [~] Camoufox 会话 + 指纹持久化 (运行中)
+- [x] **Camoufox 会话完整闭环** (修复后): 指纹生成持久化→google.com→搜索"iphone ultra"→点击结果阅读→News→区域自检→profile 持久化; rc=0, gracefully close
+- [x] **卸载验收全过**: 服务/目录/UFW规则(含限源)/tunnel用户 零残留
+- [x] 修复 bug 7: engine_setup 补浏览器系统依赖 (Debian12 无 libgtk-3 → XPCOMGlueLoad 失败)
+- [x] 修复 bug 8: 区域自检判定纳入 jump 落地域主信号 (002 实测 jump=com.hk 被误判 OK);7 用例单测全过
+- [~] 指纹复用双会话验证 (运行中)
+
+## 重要发现
+
+**002 的 IP (192.255.172.110, HostPapa LA) 被 Google 302 至 google.com.hk** —
+轻度送中实锤(与 cloudnium 旧机同段同 ASN)。这台测试机本身就是养护对象,
+区域自检将持续报告 SINICIZED (修复后的判定),可作真实效果的天然观察窗口。
 
 ### Agent 安装明细验证
 - config: AGENT_VERSION=5.2.1, REGION=US-LA, AGENT_PORT=36357, NODE_ALIAS=L-test
