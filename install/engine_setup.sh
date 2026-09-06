@@ -13,6 +13,15 @@
 do_engine_setup() {
     echo -e "\n[5/5] 正在部署浏览器养护引擎 (Camoufox) ..."
 
+    # ---------- 0. 浏览器系统依赖 (Debian 最小安装无 GTK,实测 XPCOMGlueLoad 失败) ----------
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y --no-install-recommends libgtk-3-0 libx11-xcb1 libxcb-shm0 libxcomposite1 libxdamage1 libxrandr2 libasound2 >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        $PKG_MGR install -y gtk3 alsa-lib >/dev/null 2>&1 || true
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache gtk+3.0 >/dev/null 2>&1 || true
+    fi
+
     # ---------- 1. venv + Camoufox ----------
     if [ ! -x "${MASTER_DIR}/venv/bin/python3" ]; then
         echo "🐍 正在创建 Python 虚拟环境 (venv)..."
