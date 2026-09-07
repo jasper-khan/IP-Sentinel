@@ -427,25 +427,46 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
                 tg_url = config_mem.get('TG_API_URL', '')
                 chat_id = config_mem.get('CHAT_ID', '')
 
+                # [Safe OTA] 版本守卫的跳过回报 (已是最新时回执, 静默跳过会让按钮无反馈)
+                skip_msg = f"ℹ️ **OTA 跳过**\n📍 节点: `{config_mem.get('NODE_ALIAS', '未知')}`\n当前 `v{config_mem.get('AGENT_VERSION', '?')}` 已 ≥ 远端版本，无需升级。"
+                skip_msg_b64 = base64.b64encode(skip_msg.encode('utf-8')).decode('utf-8')
+
                 # 将升级逻辑进行 Base64 深层封装，免疫 Popen 或 Systemd 传递带来的指令注入风险
+                # [Safe OTA] 版本守卫 (远端不比本地新即跳过并回执) + tag 锚定
+                # (发布规范: tag = v${VER}-fork, MANIFEST 与代码同 tag 拉取)
                 ota_script = f"""
 export SILENT_OTA="true"
-OTA_TMP=$(mktemp /tmp/ips_ota.XXXXXX.sh)
-MANIFEST_TMP=$(mktemp /tmp/ips_ota_manifest.XXXXXX)
-curl -fsSL {repo_url}/MANIFEST.sha256 -o "$MANIFEST_TMP" || MANIFEST_TMP=""
-if [ -z "$MANIFEST_TMP" ]; then
-    echo "OTA Aborted: MANIFEST.sha256 unavailable" > /opt/ip_sentinel/logs/ota_upgrade.log
+LOG=/opt/ip_sentinel/logs/ota_upgrade.log
+ver_lt() {{ test "$(printf '%s\\n' "$1" "$2" | sort -V | head -n 1)" = "$1" && test "$1" != "$2"; }}
+LOCAL_VER=$(grep '^AGENT_VERSION=' /opt/ip_sentinel/config.conf 2>/dev/null | cut -d'"' -f2)
+REMOTE_VER=$(curl -fsSL --connect-timeout 10 --retry 2 {repo_url}/version.txt | grep '^AGENT_VERSION=' | cut -d'=' -f2 | tr -d '[:space:]')
+if [ -z "$REMOTE_VER" ]; then
+    echo "OTA Aborted: remote version.txt unavailable" > "$LOG"
     exit 0
 fi
-curl -fsSL {repo_url}/core/install.sh -o "$OTA_TMP"
+if ! ver_lt "$LOCAL_VER" "$REMOTE_VER"; then
+    MSG=$(echo '{skip_msg_b64}' | base64 -d)
+    curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" -d "text=$MSG" -d "parse_mode=Markdown" > /dev/null 2>&1
+    echo "OTA Skip: local ($LOCAL_VER) >= remote ($REMOTE_VER)" > "$LOG"
+    exit 0
+fi
+TAG_URL=$(echo "{repo_url}" | sed 's|/main$||')/v${{REMOTE_VER}}-fork
+OTA_TMP=$(mktemp /tmp/ips_ota.XXXXXX.sh)
+MANIFEST_TMP=$(mktemp /tmp/ips_ota_manifest.XXXXXX)
+curl -fsSL --connect-timeout 10 --retry 2 "${{TAG_URL}}/MANIFEST.sha256" -o "$MANIFEST_TMP" || MANIFEST_TMP=""
+if [ ! -s "$MANIFEST_TMP" ]; then
+    echo "OTA Aborted: MANIFEST.sha256 unavailable (tag v${{REMOTE_VER}}-fork)" > "$LOG"
+    exit 0
+fi
+curl -fsSL --connect-timeout 10 --retry 2 "${{TAG_URL}}/core/install.sh" -o "$OTA_TMP" || OTA_TMP=""
 EXPECTED=$(awk '$2 == "core/install.sh" {{print $1}}' "$MANIFEST_TMP")
-ACTUAL=$(sha256sum "$OTA_TMP" | awk '{{print $1}}')
-if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$OTA_TMP"; then
+ACTUAL=$(sha256sum "$OTA_TMP" 2>/dev/null | awk '{{print $1}}')
+if [ ! -s "$OTA_TMP" ] || [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$OTA_TMP"; then
     MSG=$(echo '{err_msg_b64}' | base64 -d)
     curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" -d "text=$MSG" -d "parse_mode=Markdown" > /dev/null 2>&1
-    echo "OTA Integrity Failed: manifest mismatch" > /opt/ip_sentinel/logs/ota_upgrade.log
+    echo "OTA Integrity Failed: manifest mismatch" > "$LOG"
 else
-    bash "$OTA_TMP" > /opt/ip_sentinel/logs/ota_upgrade.log 2>&1
+    bash "$OTA_TMP" > "$LOG" 2>&1
 fi
 rm -f "$OTA_TMP" "$MANIFEST_TMP"
 """

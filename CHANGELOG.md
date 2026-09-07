@@ -1,5 +1,19 @@
 # Changelog
 
+## [v5.6.0-fork] - 2026-09-07
+
+### ✨ Features
+
+- **Safe OTA: TG 一键升级安全加固** — 三条 OTA 链路 (Agent 单节点 / 全网 Agent / Master 自升级) 统一补齐三项防护:
+  - **tag 锚定** — 升级不再拉 main 分支现状,改为读 version.txt 版本号后从 `v{VER}-fork` tag 拉取 MANIFEST 与安装脚本 (同 tag 内自洽);版本可复现可回滚
+  - **版本守卫** — 远端不比本地新即跳过: Agent 侧跳过发 TG 回执 (按钮有反馈),Master 侧 TG 提示"已最新",根除"升级按钮变重装按钮"
+  - **Master 自升级补 MANIFEST 验签** — 此前仅 bash -n 语法检查即 root 执行,现与 Agent 侧 V3 修复对齐: sha256 强比对 + 熔断告警
+- **全舰队 OTA 确认弹窗展示目标版本** — 下发前可见将升级到哪个版本
+
+### 🐛 Fixes
+
+- **Agent OTA 下载失败静默** — 此前 MANIFEST/install.sh 拉取无超时无重试且 `curl || VAR=""` 判空逻辑失效 (文件存在即非空字符串),现补 connect-timeout + retry + `-s` 文件级判空
+
 ## [v5.5.0-fork] - 2026-09-07
 
 ### ✨ Features

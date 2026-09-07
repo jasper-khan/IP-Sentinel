@@ -12,6 +12,12 @@ source "$CONF"
 REPO_RAW_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
 MASTER_VERSION=${MASTER_VERSION:-"3.5.0"}
 
+# [Safe OTA] 语义化版本比较: version_lt A B 为真当且仅当 A < B
+version_lt() { test "$(printf '%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" && test "$1" != "$2"; }
+
+# [Safe OTA] 按版本号推导发布 tag 的 raw URL (发布规范: tag = v${VER}-fork)
+tag_raw_url() { echo "${REPO_RAW_URL%/main}/v$1-fork"; }
+
 OFFSET_FILE="${MASTER_DIR}/.tg_offset"
 [[ -f $OFFSET_FILE ]] || echo "0" > $OFFSET_FILE
 
@@ -531,8 +537,12 @@ while true; do
                     
                 "all_ota_confirm")
                     if [ -z "$CB_ID" ]; then send_msg "$CHAT_ID" "⛔ 安全拦截：非法特权执行环境。"; continue; fi
+                    # [Safe OTA] 确认弹窗展示目标版本 (tag 锚定, Agent 端另有版本守卫)
+                    FLEET_VER=$(curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt" | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+                    FLEET_VER_LINE=""
+                    [ -n "$FLEET_VER" ] && FLEET_VER_LINE="\n🎯 **目标版本**: \`v${FLEET_VER}\` (tag 锚定 + MANIFEST 验签，已是最新版本将自动跳过)\n"
                     CONFIRM_BTNS="[[{\"text\":\"🚨 我已了解风险，下发核按钮指令！\",\"callback_data\":\"all_ota_execute\"}], [{\"text\":\"取消操作\",\"callback_data\":\"/start\"}]]"
-                    WARNING_MSG="☢️ **【最高指令：全舰队 OTA 升级】**\n\n此操作将向您名下**所有开启 OTA 权限的节点**下发重组指令，强制从云端拉取最新代码并进行热重载。\n\n⚠️ **核按钮风险提示**：\n1. 升级过程中守护进程会短暂重启，节点可能出现临时离线。\n2. 若遇 GitHub 源屏蔽或网络极度恶劣，少数节点可能需要手动干预。\n\n**是否确定挂载并执行 OTA 指令？**"
+                    WARNING_MSG="☢️ **【最高指令：全舰队 OTA 升级】**\n${FLEET_VER_LINE}\n此操作将向您名下**所有开启 OTA 权限的节点**下发重组指令，强制从云端拉取最新代码并进行热重载。\n\n⚠️ **核按钮风险提示**：\n1. 升级过程中守护进程会短暂重启，节点可能出现临时离线。\n2. 若遇 GitHub 源屏蔽或网络极度恶劣，少数节点可能需要手动干预。\n\n**是否确定挂载并执行 OTA 指令？**"
                     render_ui "$CHAT_ID" "$MSG_ID" "$WARNING_MSG" "$CONFIRM_BTNS"
                     ;;
 
@@ -645,15 +655,33 @@ while true; do
                         send_msg "$CHAT_ID" "⛔ 安全拦截：非法特权执行环境或权限未开。"
                         continue
                     fi
-                    render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在下载重构图纸，司令部即将进入静默重启..."
+                    render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在校验重构图纸 (tag 锚定 + MANIFEST 验签)..."
 
+                    # [Safe OTA] 版本守卫: 远端不比本地新即拒绝 (防重装/降级)
+                    REMOTE_VER=$(curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt" | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+                    if [ -z "$REMOTE_VER" ]; then
+                        send_msg "$CHAT_ID" "❌ OTA 中止: 无法读取远端版本信息 (version.txt 不可达)，升级取消。"
+                        continue
+                    fi
+                    if ! version_lt "$MASTER_VERSION" "$REMOTE_VER"; then
+                        send_msg "$CHAT_ID" "ℹ️ OTA 跳过: 中枢 \`v${MASTER_VERSION}\` 已 ≥ 远端 \`v${REMOTE_VER}\`，无需升级。"
+                        continue
+                    fi
+
+                    # [Safe OTA] tag 锚定 + MANIFEST 验签 (对齐 Agent 侧 V3 修复，
+                    # 补齐此前 master/install_master.sh 仅 bash -n 无哈希校验的缺口)
                     # [V5 安全修复] mktemp 私有路径替代可预测的 /tmp/install_master.sh
+                    TAG_URL=$(tag_raw_url "$REMOTE_VER")
                     MASTER_OTA_SCRIPT=$(mktemp "${MASTER_DIR}/ota_install.XXXXXX.sh")
-                    curl -fsSL "${REPO_RAW_URL}/master/install_master.sh" -o "$MASTER_OTA_SCRIPT"
+                    MANIFEST_TMP=$(mktemp "${MASTER_DIR}/ota_manifest.XXXXXX")
+                    curl -fsSL --connect-timeout 10 --retry 2 "${TAG_URL}/MANIFEST.sha256" -o "$MANIFEST_TMP" || MANIFEST_TMP=""
+                    curl -fsSL --connect-timeout 10 --retry 2 "${TAG_URL}/master/install_master.sh" -o "$MASTER_OTA_SCRIPT" || MASTER_OTA_SCRIPT=""
 
-                    if ! bash -n "$MASTER_OTA_SCRIPT" >/dev/null 2>&1; then
-                        send_msg "$CHAT_ID" "❌ OTA 传输受损：脚本下载不完整，已触发防砖熔断，升级取消！"
-                        rm -f "$MASTER_OTA_SCRIPT"
+                    EXPECTED=$(awk '$2 == "master/install_master.sh" {print $1}' "$MANIFEST_TMP" 2>/dev/null)
+                    ACTUAL=$(sha256sum "$MASTER_OTA_SCRIPT" 2>/dev/null | awk '{print $1}')
+                    if [ -z "$MANIFEST_TMP" ] || [ ! -s "$MASTER_OTA_SCRIPT" ] || [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$MASTER_OTA_SCRIPT" >/dev/null 2>&1; then
+                        send_msg "$CHAT_ID" "❌ **OTA 熔断告警**%0A⚠️ 原因: tag \`v${REMOTE_VER}-fork\` 下载内容与 MANIFEST 锁定哈希不符或校验链不完整。%0A🚀 状态: 中枢升级已取消，安全。"
+                        rm -f "$MASTER_OTA_SCRIPT" "$MANIFEST_TMP"
                         continue
                     fi
 

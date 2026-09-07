@@ -113,3 +113,29 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 - engine_enabled 调度开关 (节点级暂停/恢复) 上线
 - **jump=google.com.hk 连续两次复现** (浏览器会话), curl 直连不跳 --
   002 IP 在 Google 真人浏览器判定下有 HK 倾向, WATCH 持续追踪
+
+---
+
+# Safe OTA 加固测试 (2026-09-07, 本地, 未发版)
+
+## 背景
+对照 safe OTA 设计 (tag 锚定 + MANIFEST 验签 + 确认弹窗 + 逐台回报) 审计现有 OTA 链路,
+确认 v4.4.0 V3/V5 修复后 Agent 侧验签已在,补齐三缺口。
+
+## 改动 (本地未提交)
+1. master 自升级: 补 MANIFEST 验签 (此前仅 bash -n) + 版本守卫 + tag 锚定
+2. Agent OTA: 版本守卫 (已是最新→TG 回执跳过) + tag 锚定 (tag=v${VER}-fork)
+3. 全舰队确认弹窗: 展示目标版本
+
+## 验证 (全过)
+- bash -n: tg_master.sh / agent_daemon.sh ✅
+- 内嵌 python AST 解析 (路由 8 含新 f-string) ✅
+- OTA f-string 按**文件真实 AST** 求值渲染 → bash -n ✅, printf 转义确认正确
+- version_lt 功能测试 5 例 (含 5.5.9<5.5.10 语义化比较) ✅
+- tag_raw_url: 抓出并修复 sed 拼接 bug (改 bash 参数展开), 现网 v5.5.0-fork tag raw URL 实测可达 ✅
+
+## 边界行为
+- version.txt 不可达 → 中止 (Agent 静默写 log / Master TG 告警)
+- tag 未发布 (bump 未打 tag) → MANIFEST 拉取失败 → 熔断告警
+- 本地版本 ≥ 远端 → 跳过并回执 (Agent TG 通知 / Master TG 通知)
+- 验签失败 → 熔断告警, 不执行
