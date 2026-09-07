@@ -103,3 +103,13 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 
 ### 修复
 - v5.3.3: 引导器 CDN 间歇 404 -> fetch_retry shell 循环 (curl --retry 不重试 404)
+## 功能恢复 + 手动触发验证 (2026-09-07)
+
+- v5.4.0: TG 面板恢复 Google 纠偏/信用净化入口 (浏览器引擎版):
+  界面层沿用上游 (按钮/回调/布局), 执行层重写为本地触发文件队列 ->
+  调度器 45-90s 消费 -> focus=google/trust/all 会话变体
+- 手动触发 E2E 闭环 (用户点按钮 -> 日志验证):
+  focus=google 会话完整跑通: 双轮搜索+点击阅读+News+Maps坐标驻留+区域自检
+- engine_enabled 调度开关 (节点级暂停/恢复) 上线
+- **jump=google.com.hk 连续两次复现** (浏览器会话), curl 直连不跳 --
+  002 IP 在 Google 真人浏览器判定下有 HK 倾向, WATCH 持续追踪
