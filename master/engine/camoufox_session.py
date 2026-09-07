@@ -236,8 +236,14 @@ def obtain_seeds(profile_dir):
     return seeds
 
 
-def run_session(node, region_code, socks_port, persona, keywords):
-    """一次完整拟人会话。任何浏览器层异常只记日志,不抛出 (调度器兜底)。"""
+def run_session(node, region_code, socks_port, persona, keywords, focus="all"):
+    """一次完整拟人会话。任何浏览器层异常只记日志,不抛出 (调度器兜底)。
+
+    focus: 会话侧重 (对应原 curl 双模块的产品语义)
+      - google: Google 区域纠偏侧重 (首页+多轮搜索点击+News+Maps)
+      - trust : IP 信用净化侧重 (区域白名单站点深访)
+      - all   : 混合 (自动调度的默认形态)
+    """
     from camoufox.sync_api import Camoufox
 
     profile_dir = os.path.join(PROFILE_ROOT, node)
@@ -289,22 +295,41 @@ def run_session(node, region_code, socks_port, persona, keywords):
         page = browser.new_page()
         page.set_default_timeout(45000)
 
-        # --- 动作 1: Google 首页自然访问 (不注入 gl/hl) ---
+        act = 1   # 动作序号
+
+        def next_act():
+            nonlocal act
+            n = act
+            act += 1
+            return n
+
+        # ==========================================================
+        # [focus=google/trust] 会话侧重: 原 curl 双模块的产品语义
+        #   google → Google 系动作加量 (双轮搜索 + News + Maps)
+        #   trust  → 白名单深访 (3-4 站 + 长停留)
+        #   all    → 均衡一轮 (自动调度默认)
+        # ==========================================================
+        google_rounds = {"google": 2, "all": 1, "trust": 0}[focus]
+        trust_picks = {"google": 1, "all": 2, "trust": 4}[focus]
+
+        # --- 动作: Google 首页自然访问 (不注入 gl/hl) ---
         try:
             page.goto("https://www.google.com/", wait_until="domcontentloaded")
-            log("动作[1] google.com 完成")
+            log("动作[%d] google.com 完成" % next_act())
             time.sleep(human_dwell(8, 20))
         except Exception as e:
-            log("WARN 动作[1] 失败: %s" % e)
+            log("WARN 动作[1] google.com 失败: %s" % e)
 
-        # --- 动作 2: 搜索区域关键词 ---
-        if keywords:
+        # --- 动作: 搜索区域关键词 (可多轮) ---
+        for _ in range(google_rounds):
+            if not keywords:
+                break
             kw = random.choice(keywords)
             try:
                 page.goto(
                     "https://www.google.com/search?q=" + _q(kw),
                     wait_until="domcontentloaded")
-                log("动作[2] 搜索关键词完成: %s" % kw)
+                log("动作[%d] 搜索关键词完成: %s" % (next_act(), kw))
                 _human_scroll(page)
                 time.sleep(human_dwell())
 
@@ -314,33 +339,47 @@ def run_session(node, region_code, socks_port, persona, keywords):
                     idx = random.randint(0, min(len(results) - 1, 5))
                     results[idx].click(timeout=15000)
                     time.sleep(human_dwell(15, 40))
-                    log("动作[2b] 点击搜索结果[%d]并阅读" % idx)
+                    log("动作[%d] 点击搜索结果[%d]并阅读" % (next_act(), idx))
             except Exception as e:
-                log("WARN 动作[2] 失败: %s" % e)
+                log("WARN 搜索动作失败: %s" % e)
 
-        # --- 动作 3: Google News ---
-        try:
-            page.goto("https://news.google.com/", wait_until="domcontentloaded")
-            _human_scroll(page)
-            log("动作[3] news.google.com 完成")
-            time.sleep(human_dwell())
-        except Exception as e:
-            log("WARN 动作[3] 失败: %s" % e)
+        # --- 动作: Google News ---
+        if focus in ("google", "all"):
+            try:
+                page.goto("https://news.google.com/", wait_until="domcontentloaded")
+                _human_scroll(page)
+                log("动作[%d] news.google.com 完成" % next_act())
+                time.sleep(human_dwell())
+            except Exception as e:
+                log("WARN News 动作失败: %s" % e)
 
-        # --- 动作 4: 区域白名单站点 1-2 个 ---
+        # --- 动作: Google Maps (纠偏侧重: 区域坐标驻留) ---
+        if focus == "google" and persona["lat"]:
+            try:
+                page.goto(
+                    "https://www.google.com/maps/@%.4f,%.4f,15z"
+                    % (persona["lat"], persona["lon"]),
+                    wait_until="domcontentloaded")
+                _human_scroll(page)
+                log("动作[%d] Google Maps 驻留完成" % next_act())
+                time.sleep(human_dwell(20, 50))
+            except Exception as e:
+                log("WARN Maps 动作失败: %s" % e)
+
+        # --- 动作: 区域白名单站点深访 ---
         statics = [u for u in persona["static_urls"] if safe_url(u)]
         if statics:
-            picks = random.sample(statics, min(len(statics), random.randint(1, 2)))
-            for i, url in enumerate(picks, start=4):
+            picks = random.sample(statics, min(len(statics), trust_picks))
+            for url in picks:
                 try:
                     page.goto(url, wait_until="domcontentloaded")
                     _human_scroll(page)
-                    log("动作[%d] 白名单站点完成: %s" % (i, url))
-                    time.sleep(human_dwell())
+                    log("动作[%d] 白名单站点完成: %s" % (next_act(), url))
+                    time.sleep(human_dwell(30, 80) if focus == "trust" else human_dwell())
                 except Exception as e:
-                    log("WARN 动作[%d] %s 失败: %s" % (i, url, e))
+                    log("WARN 白名单 %s 失败: %s" % (url, e))
 
-        # --- 动作 5: 会话尾区域自检 (三核探测 + 漂移/送中落盘) ---
+        # --- 会话尾: 区域自检 (三核探测 + 漂移/送中落盘) ---
         probe = probe_region(page)
         region_verdict(node, region_code, probe)
 
@@ -349,7 +388,7 @@ def run_session(node, region_code, socks_port, persona, keywords):
         except Exception:
             pass
 
-    log("会话结束, profile 已持久化: %s" % profile_dir)
+    log("会话结束 (focus=%s), profile 已持久化: %s" % (focus, profile_dir))
 
 
 def _q(text):
@@ -485,6 +524,8 @@ def main():
                     help="注册报文携带的区域参数 (hl=xx&gl=XX),优先于模板")
     ap.add_argument("--lat", default=None, help="注册报文携带的纬度")
     ap.add_argument("--lon", default=None, help="注册报文携带的经度")
+    ap.add_argument("--focus", default="all", choices=["all", "google", "trust"],
+                    help="会话侧重: google=区域纠偏 trust=信用净化 all=混合")
     args = ap.parse_args()
 
     NODE = args.node
@@ -495,7 +536,8 @@ def main():
     keywords = load_keywords(args.region)
 
     try:
-        run_session(args.node, args.region, args.socks_port, persona, keywords)
+        run_session(args.node, args.region, args.socks_port, persona, keywords,
+                    focus=args.focus)
         return 0
     except ImportError:
         log("FATAL camoufox 未安装 (venv 损坏?)")

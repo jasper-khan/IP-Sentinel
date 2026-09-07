@@ -77,7 +77,7 @@ is_local_node() {
 }
 
 launch_session() {
-    local n="$1" region="$2" lang_params="$3" lat="$4" lon="$5" node_ip="$6"
+    local n="$1" region="$2" lang_params="$3" lat="$4" lon="$5" node_ip="$6" focus="$7"
     local port
     port=$(node_port "$n")
 
@@ -88,12 +88,13 @@ launch_session() {
 
     ensure_keywords "$region"
 
-    log "节点 ${n} 进入会话 (region=${region}, persona=${lang_params:-default} @(${lat:-?},${lon:-?}), proxy=${port:-local})"
+    log "节点 ${n} 进入会话 (focus=${focus:-all}, region=${region}, proxy=${port:-local})"
 
     local extra_args=()
     [ -n "$lang_params" ] && extra_args+=(--lang-params "$lang_params")
     [ -n "$lat" ] && extra_args+=(--lat "$lat")
     [ -n "$lon" ] && extra_args+=(--lon "$lon")
+    [ -n "$focus" ] && extra_args+=(--focus "$focus")
 
     (
         if [ -n "$port" ]; then
@@ -117,6 +118,24 @@ launch_session() {
     disown
 }
 
+# [手动触发队列] TG 按钮写 <node>.trigger (内容=focus),调度器消费:
+# 优先于间隔门禁,但仍受并发槽位与同节点互斥约束
+consume_trigger() {
+    local n="$1" region="$2" lp="$3" lat="$4" lon="$5" ip="$6"
+    local trig="${STATE_DIR}/${n}.trigger"
+    [ -f "$trig" ] || return 1
+    local focus
+    focus=$(cat "$trig" 2>/dev/null | head -n 1 | tr -cd 'a-z')
+    [ -z "$focus" ] && focus="all"
+    rm -f "$trig"
+    if node_running "$n"; then
+        log "节点 ${n} 手动触发: 会话进行中,触发并入下一轮"
+        return 1
+    fi
+    launch_session "$n" "$region" "$lp" "$lat" "$lon" "$ip" "$focus"
+    return 0
+}
+
 log "========== 会话调度器启动 (并发=${ENGINE_CONCURRENCY}, 间隔=${ENGINE_MIN_INTERVAL}s) =========="
 
 while true; do
@@ -128,12 +147,18 @@ while true; do
     SLOTS=$((ENGINE_CONCURRENCY - ACTIVE))
 
     if [ "$SLOTS" -gt 0 ]; then
-        NODES=$(db_exec "SELECT node_name, region, IFNULL(lang_params,''), IFNULL(base_lat,''), IFNULL(base_lon,''), IFNULL(agent_ip,'') FROM nodes WHERE psk IS NOT NULL AND psk != '' ORDER BY last_seen DESC;")
+        NODES=$(db_exec "SELECT node_name, region, IFNULL(lang_params,''), IFNULL(base_lat,''), IFNULL(base_lon,''), IFNULL(agent_ip,'') FROM nodes WHERE psk IS NOT NULL AND psk != '' AND IFNULL(engine_enabled,'true') != 'false' ORDER BY last_seen DESC;")
 
         while IFS='|' read -r n region lang_params lat lon node_ip; do
             [ -z "$n" ] && continue
             [ "$SLOTS" -le 0 ] && break
             region="${region:-US}"
+
+            # 手动触发优先 (TG 按钮),不受间隔门禁限制
+            if consume_trigger "$n" "$region" "$lang_params" "$lat" "$lon" "$node_ip"; then
+                SLOTS=$((SLOTS - 1))
+                continue
+            fi
 
             # 同节点在跑即跳过
             if node_running "$n"; then
@@ -148,7 +173,7 @@ while true; do
                 continue
             fi
 
-            launch_session "$n" "$region" "$lang_params" "$lat" "$lon" "$node_ip"
+            launch_session "$n" "$region" "$lang_params" "$lat" "$lon" "$node_ip" "all"
             SLOTS=$((SLOTS - 1))
         done <<< "$NODES"
     fi

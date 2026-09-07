@@ -226,6 +226,8 @@ db_exec "ALTER TABLE nodes ADD COLUMN tunnel_user TEXT DEFAULT 'sentinel-tunnel'
 db_exec "ALTER TABLE nodes ADD COLUMN lang_params TEXT;" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN base_lat TEXT;" 2>/dev/null
 db_exec "ALTER TABLE nodes ADD COLUMN base_lon TEXT;" 2>/dev/null
+# [引擎调度开关] 节点级暂停/恢复浏览器养护 (TG 面板可切)
+db_exec "ALTER TABLE nodes ADD COLUMN engine_enabled TEXT DEFAULT 'true';" 2>/dev/null
 
 db_exec "CREATE TABLE IF NOT EXISTS ip_trend_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -516,9 +518,9 @@ while true; do
                     NODE_COUNT=$(db_exec "SELECT COUNT(*) FROM nodes WHERE chat_id='$CHAT_ID';")
 
                     if [ "$IS_OFFICIAL_GATEWAY" != "true" ]; then
-                        BTNS="[${BTN_MASTER_OTA}[{\"text\":\"🌍 进入全球雷达 (管理节点)\",\"callback_data\":\"list_nodes\"}], [{\"text\":\"📊 获取全局简报\",\"callback_data\":\"all_reports\"}], [{\"text\":\"🔄 全网节点 OTA 热重载\",\"callback_data\":\"all_ota_confirm\"}, {\"text\":\"🔁 全舰队切换 Bot 凭证\",\"callback_data\":\"reconfig_confirm\"}], [{\"text\":\"🌟 前往 GitHub 点亮星标\",\"url\":\"https://github.com/jasper-khan/IP-Sentinel\"}]]"
+                        BTNS="[${BTN_MASTER_OTA}[{\"text\":\"🌍 进入全球雷达 (管理节点)\",\"callback_data\":\"list_nodes\"}], [{\"text\":\"🚀 唤醒全局巡逻\",\"callback_data\":\"all_run\"}, {\"text\":\"📊 获取全局简报\",\"callback_data\":\"all_reports\"}], [{\"text\":\"🔄 全网节点 OTA 热重载\",\"callback_data\":\"all_ota_confirm\"}, {\"text\":\"🔁 全舰队切换 Bot 凭证\",\"callback_data\":\"reconfig_confirm\"}], [{\"text\":\"🌟 前往 GitHub 点亮星标\",\"url\":\"https://github.com/jasper-khan/IP-Sentinel\"}]]"
                     else
-                        BTNS="[[{\"text\":\"🌍 进入全球雷达 (管理节点)\",\"callback_data\":\"list_nodes\"}], [{\"text\":\"📊 获取全局简报\",\"callback_data\":\"all_reports\"}], [{\"text\":\"🌟 前往 GitHub 点亮星标\",\"url\":\"https://github.com/jasper-khan/IP-Sentinel\"}]]"
+                        BTNS="[[{\"text\":\"🌍 进入全球雷达 (管理节点)\",\"callback_data\":\"list_nodes\"}], [{\"text\":\"🚀 唤醒全局巡逻\",\"callback_data\":\"all_run\"}, {\"text\":\"📊 获取全局简报\",\"callback_data\":\"all_reports\"}], [{\"text\":\"🌟 前往 GitHub 点亮星标\",\"url\":\"https://github.com/jasper-khan/IP-Sentinel\"}]]"
                     fi
                     DISP_MASTER="${MASTER_NODE_NAME:-未命名中枢}"
                     
@@ -680,7 +682,21 @@ while true; do
                     fi
                     ;;
 
-                # [引擎代管] "all_run" 本地巡逻指令已移除 (养护由 Master 浏览器引擎执行)
+                "all_run")
+                    # [引擎版] 唤醒全局巡逻: 对所有节点写入触发文件,引擎调度器排队执行
+                    NODE_DATA=$(db_exec "SELECT node_name FROM nodes WHERE chat_id='$CHAT_ID' AND psk IS NOT NULL AND psk != '' AND IFNULL(engine_enabled,'true') != 'false';")
+                    if [ -z "$NODE_DATA" ]; then
+                        render_msg "$CHAT_ID" "$MSG_ID" "⚠️ 您名下暂无可调度的节点 (未注册/无 PSK/已暂停)。"
+                    else
+                        COUNT=0
+                        echo "$NODE_DATA" | while IFS='|' read -r NNAME; do
+                            [ -z "$NNAME" ] && continue
+                            echo "all" > "${MASTER_DIR}/.engine_state/${NNAME}.trigger"
+                            COUNT=$((COUNT+1))
+                        done
+                        render_msg "$CHAT_ID" "$MSG_ID" "📢 **司令部指令下达：正在唤醒所有哨兵执行浏览器养护巡逻...**%0A*(各节点将由引擎按并发槽位排队执行,约 1 分钟内开始)*"
+                    fi
+                    ;;
 
                 "/quality"|"/quality@"*)
                     TARGET_NODE=$(echo "$TEXT" | awk '{print $2}')
@@ -808,12 +824,29 @@ while true; do
                     [ -z "$TARGET_ALIAS" ] && TARGET_ALIAS="$TARGET_NODE"
 
                     TOGGLE_INFO=$(db_exec "SELECT enable_ota, agent_ip, IFNULL(last_seen, '未知') FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
+                    # 引擎版面板: engine_enabled 开关 + 两个触发按钮 (浏览器引擎实现)
+                    ST_ENG=$(db_exec "SELECT IFNULL(engine_enabled,'true') FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
+                    TOGGLE_INFO=$(db_exec "SELECT enable_ota, agent_ip, IFNULL(last_seen, '未知') FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
                     ST_OTA=$(echo "$TOGGLE_INFO" | cut -d'|' -f1)
                     A_IP=$(echo "$TOGGLE_INFO" | cut -d'|' -f2)
                     LAST_SEEN=$(echo "$TOGGLE_INFO" | cut -d'|' -f3)
 
-                    # [引擎代管] 本地 curl 模块开关/触发按钮已移除 (养护由 Master 浏览器引擎执行)
-                    BTN_ACTION="[{\"text\":\"🔍 投放深海声呐 (查IP质量)\",\"callback_data\":\"quality:$TARGET_NODE\"}, {\"text\":\"📈 查看 IP 污染趋势图\",\"callback_data\":\"trend:$TARGET_NODE\"}], [{\"text\":\"📜 提取终端实时日志\",\"callback_data\":\"log:$TARGET_NODE\"}, {\"text\":\"📊 生成单机战报\",\"callback_data\":\"report:$TARGET_NODE\"}]"
+                    # [区域自检状态] (引擎会话落盘的判定)
+                    REGION_STATE="(无)"
+                    [ -f "${MASTER_DIR}/profiles/${TARGET_NODE}.region" ] && \
+                        REGION_STATE=$(jq -r '.verdict + " (jump=" + (.jump // "?") + ")"' "${MASTER_DIR}/profiles/${TARGET_NODE}.region" 2>/dev/null)
+
+                    # 触发按钮 (引擎版: 写触发文件, 调度器 45-90s 内执行)
+                    BTN_ACTION="[{\"text\":\"📍 触发 Google 纠偏\",\"callback_data\":\"google:$TARGET_NODE\"}, {\"text\":\"🛡️ 触发信用净化\",\"callback_data\":\"trust:$TARGET_NODE\"}], [{\"text\":\"🔍 投放深海声呐 (查IP质量)\",\"callback_data\":\"quality:$TARGET_NODE\"}, {\"text\":\"📈 查看 IP 污染趋势图\",\"callback_data\":\"trend:$TARGET_NODE\"}], [{\"text\":\"📜 提取终端实时日志\",\"callback_data\":\"log:$TARGET_NODE\"}, {\"text\":\"📊 生成单机战报\",\"callback_data\":\"report:$TARGET_NODE\"}]"
+
+                    # 引擎调度开关
+                    if [ "$ST_ENG" != "false" ]; then
+                        BTN_ENG="[{\"text\":\"🟢 浏览器养护: 开启中 (点击暂停)\",\"callback_data\":\"engine:$TARGET_NODE:false\"}]"
+                        ENG_DESC="🟢 浏览器养护调度: 开启"
+                    else
+                        BTN_ENG="[{\"text\":\"🔴 浏览器养护: 已暂停 (点击恢复)\",\"callback_data\":\"engine:$TARGET_NODE:true\"}]"
+                        ENG_DESC="🔴 浏览器养护调度: 已暂停"
+                    fi
 
                     if [ "$IS_OFFICIAL_GATEWAY" != "true" ] && [ "$ST_OTA" == "true" ]; then
                         BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}, {\"text\":\"🆙 OTA 静默升级\",\"callback_data\":\"ota_confirm:$TARGET_NODE\"}]"
@@ -823,10 +856,45 @@ while true; do
 
                     BTN_DANGER="[{\"text\":\"🗑️ 从中枢销毁该档案\",\"callback_data\":\"del_confirm:$TARGET_NODE\"}, {\"text\":\"⬅️ 返回战区列表\",\"callback_data\":\"list_nodes\"}]"
 
-                    BTNS="[$BTN_ACTION, $BTN_CONFIG, $BTN_DANGER]"
-                    TEXT_MSG="⚙️ **目标锁定**: \`$TARGET_ALIAS\`\n(底层标识: \`$TARGET_NODE\`)\n🌐 IP 坐标: \`$A_IP\`\n🕒 档案登记时间: \`$LAST_SEEN\`\n\n🤖 养护引擎: Master 浏览器代管 (区域自检见 engine 日志)\n\n请下达精确控制指令："
+                    BTNS="[$BTN_ACTION, $BTN_ENG, $BTN_CONFIG, $BTN_DANGER]"
+                    TEXT_MSG="⚙️ **目标锁定**: \`$TARGET_ALIAS\`\n(底层标识: \`$TARGET_NODE\`)\n🌐 IP 坐标: \`$A_IP\`\n🕒 档案登记时间: \`$LAST_SEEN\`\n\n🤖 $ENG_DESC\n📍 区域自检: $REGION_STATE\n\n请下达精确控制指令："
 
                     render_ui "$CHAT_ID" "$MSG_ID" "$TEXT_MSG" "$BTNS"
+                    ;;
+
+                google:*|trust:*)
+                    # [引擎版触发] 写触发文件, 引擎调度器 45-90s 内执行对应侧重会话
+                    FOCUS=$(echo "$TEXT" | cut -d':' -f1)
+                    TARGET_NODE=$(echo "${TEXT#*:}" | tr -cd 'a-zA-Z0-9_.-')
+                    CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
+
+                    VALID_OWNER=$(db_exec "SELECT 1 FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
+                    if [ "$VALID_OWNER" == "1" ]; then
+                        mkdir -p "${MASTER_DIR}/.engine_state"
+                        echo "$FOCUS" > "${MASTER_DIR}/.engine_state/${TARGET_NODE}.trigger"
+                        if [ "$FOCUS" == "google" ]; then
+                            render_msg "$CHAT_ID" "$MSG_ID" "✅ **已下令**: 节点 \`$TARGET_NODE\` 即将执行 📍 Google 区域纠偏会话。%0A*(浏览器引擎将在约 1 分钟内启动,完成后区域自检自动落盘)*"
+                        else
+                            render_msg "$CHAT_ID" "$MSG_ID" "✅ **已下令**: 节点 \`$TARGET_NODE\` 即将执行 🛡️ IP 信用净化会话。%0A*(浏览器引擎将在约 1 分钟内启动,对区域白名单站点深访)*"
+                        fi
+                    fi
+                    ;;
+
+                engine:*)
+                    # [引擎版开关] 节点级暂停/恢复浏览器养护调度
+                    IFS=':' read -r CMD TARGET_NODE NEW_STATE <<< "$TEXT"
+                    CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
+                    TARGET_NODE=$(echo "$TARGET_NODE" | tr -cd 'a-zA-Z0-9_.-')
+
+                    VALID_OWNER=$(db_exec "SELECT 1 FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
+                    if [ "$VALID_OWNER" == "1" ] && [[ "$NEW_STATE" =~ ^(true|false)$ ]]; then
+                        db_exec "UPDATE nodes SET engine_enabled='$NEW_STATE' WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE';"
+                        if [ "$NEW_STATE" == "true" ]; then
+                            render_msg "$CHAT_ID" "$MSG_ID" "🟢 节点 \`$TARGET_NODE\` 浏览器养护调度已恢复。"
+                        else
+                            render_msg "$CHAT_ID" "$MSG_ID" "🔴 节点 \`$TARGET_NODE\` 浏览器养护调度已暂停 (进行中的会话不受影响,后续不再自动调度)。"
+                        fi
+                    fi
                     ;;
 
                 del_confirm:*)
