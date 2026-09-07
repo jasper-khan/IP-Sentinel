@@ -65,10 +65,17 @@ def find_region_json(region_code):
 
 
 def load_persona(region_code, region_json_path, lang_params=None, lat=None, lon=None):
-    """组装 Camoufox persona。
+    """组装 persona 的"行为剧本"部分。
 
-    优先级: 注册报文携带的 DB 字段 (lang_params/lat/lon,精确到节点装机时
-    选定的城市) > 本地区域模板 json > 默认值。
+    注意: 浏览器地理 (timezone/locale/经纬度) 已改由 geoip=True 按出口 IP 自动
+    推导,不再从此处注入。本函数产出的字段现仅供行为层使用:
+      - lat/lon      → Google Maps 城市级驻留 URL (与 geoip 同区域)
+      - static_urls  → 信用净化白名单深访站点
+      - lang_params  → Google 搜索 gl/hl (按 region 定"装成哪国人搜索")
+      - locale/timezone → 保留字段 (地理已由 geoip 接管,此处仅作兜底/日志)
+
+    优先级: 注册报文携带的 DB 字段 (lang_params/lat/lon,装机选定城市) >
+    本地区域模板 json > 默认值。
     """
     # DB 字段优先 (来自该节点 Agent 注册时的区域配置)
     effective_lang = lang_params or ""
@@ -261,31 +268,22 @@ def run_session(node, region_code, socks_port, persona, keywords, focus="all"):
         proxy = None
         proxy_desc = "direct (local egress)"
 
-    # [persona 注入] timezone 必须经 config 传递 (camoufox 构造函数无 timezone 参数);
-    # 与持久化噪声种子合并——set_into 只在键不存在时写入,预置即锁定
+    # [地理注入] 经纬度/时区/locale 全部交给 geoip=True 按出口 IP 自动推导,
+    # 四信道 (tz/lat/lon/locale) 同源于同一 IP,天生自洽;并自动对齐 WebRTC 到
+    # 出口 IP,关闭 IPv6 防双栈泄漏。geoip 走 proxy 时通过隧道查目标机出口 IP。
+    # persona 的 lat/lon 不再注入浏览器,仅供 Maps 驻留 URL (城市级,同区域)。
+    # config 仅承载持久化噪声种子 (set_into 尊重已存在键,指纹身份不被 geoip 覆盖)。
     node_config = dict(node_seeds)
-    node_config["timezone"] = persona["timezone"]
 
-    # geolocation 为 dict 格式;locale 用 语言-地区 全格式 (en-US 而非 en)
-    locale_full = persona["locale"]
-    if "-" not in locale_full:
-        cc = region_code.upper()
-        common = {"US": "en-US", "GB": "en-GB", "FR": "fr-FR", "DE": "de-DE",
-                  "JP": "ja-JP", "KR": "ko-KR", "TW": "zh-TW", "SG": "en-SG",
-                  "AU": "en-AU", "CA": "en-CA", "IN": "en-IN"}
-        locale_full = common.get(cc, "en-US")
-
-    log("启动会话: region=%s tz=%s locale=%s lat,lon=(%.4f,%.4f) proxy=%s"
-        % (region_code, persona["timezone"], locale_full,
-           persona["lat"], persona["lon"], proxy_desc))
+    log("启动会话: region=%s geoip=auto(跟随出口IP) proxy=%s"
+        % (region_code, proxy_desc))
 
     with Camoufox(
         fingerprint=node_fp,
         config=node_config,
         i_know_what_im_doing=True,          # 自定义持久化指纹为有意行为
         proxy=proxy,
-        locale=locale_full,
-        geolocation={"latitude": persona["lat"], "longitude": persona["lon"]},
+        geoip=True,                         # 地理跟随出口 IP: tz/经纬度/locale 自动自洽 + WebRTC 对齐
         humanize=True,                      # Camoufox 原生拟人光标/滚动
         persistent_context=True,
         user_data_dir=profile_dir,

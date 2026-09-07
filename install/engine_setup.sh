@@ -44,11 +44,25 @@ do_engine_setup() {
     fi
 
     # 浏览器本体 (缺失时拉取;已存在跳过)
+    # 注: camoufox fetch 在装了 geoip extra 时会顺带下载 GeoIP 数据库 (mmdb)
     if ! ls "${MASTER_DIR}/.camoufox" >/dev/null 2>&1; then
         echo "🦊 正在拉取 Camoufox 浏览器本体 (~150MB, 首次较慢)..."
         CAMOUFOX_HOME="${MASTER_DIR}/.camoufox" "${MASTER_DIR}/venv/bin/python3" -m \
             camoufox fetch >/dev/null 2>&1 || {
             echo -e "\033[33m⚠️ 浏览器本体拉取失败，可稍后手动执行: ${MASTER_DIR}/venv/bin/python3 -m camoufox fetch\033[0m"
+        }
+    fi
+
+    # ---------- 1.5 GeoIP 数据库 (geoip=True 运行时必需) ----------
+    # 地理跟随出口 IP 需要 MaxMind mmdb。camoufox fetch 已尝试下载,此处显式
+    # 校验:不可用则单独补拉。缺库会导致会话 UnknownIPLocation 崩溃,必须堵死。
+    if ! CAMOUFOX_HOME="${MASTER_DIR}/.camoufox" "${MASTER_DIR}/venv/bin/python3" -c \
+        "from camoufox.geolocation import geoip_allowed, get_mmdb_path; geoip_allowed(); import os; assert os.path.exists(get_mmdb_path('ipv4'))" >/dev/null 2>&1; then
+        echo "🌍 正在补拉 GeoIP 数据库 (地理跟随出口 IP 所需)..."
+        CAMOUFOX_HOME="${MASTER_DIR}/.camoufox" "${MASTER_DIR}/venv/bin/python3" -c \
+            "from camoufox.geolocation import download_mmdb; download_mmdb()" >/dev/null 2>&1 || {
+            echo -e "\033[33m⚠️ GeoIP 数据库拉取失败。地理跟随将不可用 (会话仍可跑但无 geoip 地理)。\033[0m"
+            echo -e "\033[33m   可稍后手动执行: CAMOUFOX_HOME=${MASTER_DIR}/.camoufox ${MASTER_DIR}/venv/bin/python3 -c 'from camoufox.geolocation import download_mmdb; download_mmdb()'\033[0m"
         }
     fi
 

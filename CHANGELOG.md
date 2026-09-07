@@ -1,5 +1,16 @@
 # Changelog
 
+## [v5.5.0-fork] - 2026-09-07
+
+### ✨ Features
+
+- **地理跟随出口 IP (geoip=True)** — 浏览器地理 (时区/经纬度/locale) 改由 Camoufox `geoip=True` 按 SOCKS 出口 IP 自动推导。四信道同源于同一 IP,天生自洽,根除此前"手动模板拼接 tz/lat/lon/locale 可能自相矛盾"的风险 (如东京 IP 配 UTC 时区);并自动对齐 WebRTC 到出口 IP、关闭 IPv6 防双栈泄漏。走 proxy 时 geoip 通过隧道查目标机真实出口 IP。经评估放弃 GeoSpoof 浏览器扩展方案 (要求 Firefox ≥140,而 Camoufox 内核为 135;且其地理配置依赖 popup 交互,与无人值守架构冲突)
+- **区域模板降级为纯行为剧本** — `load_persona` 产出的 lang_params (Google gl/hl)、static_urls (白名单)、keywords、lat/lon (Maps 城市级驻留) 全部保留,继续按 region 决定"装成哪国人上网";地理由 geoip 接管,行为由 region 控制,分工明确
+
+### 🐛 Fixes
+
+- **engine_setup 补 GeoIP 数据库校验** — geoip=True 运行时必需 MaxMind mmdb,`camoufox fetch` 虽会顺带下载但存在软失败风险;现显式校验 mmdb 可用性,缺失则单独补拉,堵死"缺库导致会话 UnknownIPLocation 崩溃"的坑
+
 ## [v5.1.0-fork] - 2026-09-06
 
 ### ✨ Features
