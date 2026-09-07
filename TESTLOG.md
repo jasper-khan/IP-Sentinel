@@ -83,3 +83,23 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 - PSK: 64 hex present; SSH_PORT=22; TUNNEL_USER=sentinel-tunnel
 - 服务: agent-daemon active; runner 不存在(✅ 引擎代管); probe vendor+sha 落地
 - sentinel-tunnel 用户不存在(同机未贴公钥,正确)
+## 纯净重装测试 (2026-09-07 晨)
+
+### 流程
+根除(官方卸载器x2 + camoufox 状态清理,零残留) -> 纯净首装 Master -> Agent -> 注册入库 -> 调度器自动会话
+
+### 结果
+- 根除验证: 目录/服务/进程/UFW/camoufox 缓存 全部零残留
+- Master 纯净首装: v5.3.2 -> v5.3.3, 三服务 active, venv+浏览器 fetch+密钥齐
+- Agent 纯净首装: v5.3.3, PSK/persona/限源/探针 vendor/无 runner
+- 注册: 用户转发 -> 入库 13 字段 (token 修复后自动从队列捞回,无需二次转发)
+- 调度器自动首轮会话: 指纹持久化+完整 persona+动作流
+
+### 新发现 bug (10)
+- 安装器 stdin 间歇性错位 (管道喂答案时 TG_TOKEN 被截为 "1"):
+  同答案序列两次错一次对,间歇性。仅影响自动化管道安装,真实交互式
+  用户不受影响 (TTY 逐行 read 无错位机会)。待根因定位。
+- Master 卸载需双确认 (菜单 2 + y),自动化喂答案需 2+y 两行
+
+### 修复
+- v5.3.3: 引导器 CDN 间歇 404 -> fetch_retry shell 循环 (curl --retry 不重试 404)
