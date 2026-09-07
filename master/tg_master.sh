@@ -355,6 +355,13 @@ while true; do
             if [[ "$TEXT" == *"#REGISTER#"* ]]; then
                 REG_LINE=$(echo "$TEXT" | grep "#REGISTER#" | head -n 1 | tr -d '\` ')
 
+                # [运维取证] 注册报文原文留档 (排查拆行/截断类问题)
+                {
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] NF=$(echo "$REG_LINE" | awk -F'|' '{print NF}')"
+                    echo "RAW_TEXT=[${TEXT:0:400}]"
+                    echo "---"
+                } >> "${MASTER_DIR}/logs/register_debug.log" 2>/dev/null
+
                 # [V2 加固] 注册报文含 PSK (敏感凭证)——解析完成后立即删除 TG 消息,
                 # 避免密钥长期留存于聊天历史 (任何能读该聊天的人 = 能伪造指令)
                 if [ -n "$USER_MSG_ID" ]; then
