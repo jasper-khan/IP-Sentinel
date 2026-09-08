@@ -1,5 +1,16 @@
 # Changelog
 
+## [v5.6.2-fork] - 2026-09-08
+
+### ✨ Features
+
+- **时区按节点城市对齐 (主线程 + Worker 双realm)** — 养护会话时区不再靠 geoip 的 IP 粗判 (实测把 LA 出口判成 America/Chicago,差 2h),改由节点城市坐标定 IANA 时区:
+  - **坐标级时区表** `data/timezones.json` (build 时用 timezonefinder 预生成 67 城 `by_coords` + 国家级 `by_country` 兜底,运行时零依赖);引擎按节点 base_lat/base_lon 规范化到 4 位小数查表
+  - **Worker realm**: `config['timezone']` 覆盖 (geoip 用 setdefault,手动值优先,Camoufox PR #563 生效)
+  - **主线程 realm**: Camoufox 152 build 的 config 时区不作用于主文档 (实测恒 UTC),另用 playwright `add_init_script` 引擎级注入强改 Intl/Date 全族 (DST 动态、函数伪装 native code)
+  - 两 realm 同源同一 IANA;经纬度/locale/WebRTC 仍由 geoip 按出口 IP 自洽。已有节点无需重注册 (坐标已在库)
+- 引擎侧改动,Agent 不受影响 (仅 bump MASTER_VERSION)
+
 ## [v5.6.1-fork] - 2026-09-07
 
 ### 🐛 Fixes

@@ -52,6 +52,135 @@ def log(msg):
     print(line)
 
 
+INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_init_script.
+// TZ injected as script source placeholder __TZ__; offsets computed dynamically (DST-correct).
+(function () {
+  var TZ = "__TZ__";
+  var NATIVE_TOSTRING = "function %s() { [native code] }";
+  function fakeNative(fn, name) {
+    try { fn.toString = function(){ return NATIVE_TOSTRING.replace("%s", name); }; } catch(e){}
+    return fn;
+  }
+  try {
+    var _RDTF = Intl.DateTimeFormat;
+
+    // Local-time parts of `d` expressed in TZ, and its offset in minutes (getTimezoneOffset convention).
+    var _dtfParts = new _RDTF("en-US", { timeZone: TZ, hour12: false,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    function partsOf(d) {
+      var map = {};
+      var arr = _dtfParts.formatToParts(d);
+      for (var i = 0; i < arr.length; i++) map[arr[i].type] = arr[i].value;
+      return map;
+    }
+    function offsetOf(d) {
+      var m = partsOf(d);
+      var asUTC = Date.UTC(+m.year, m.month - 1, +m.day, (+m.hour) % 24, +m.minute, +m.second);
+      return Math.round((d.getTime() - asUTC) / 60000); // minutes behind UTC → getTimezoneOffset convention
+    }
+
+    // ---- Intl.DateTimeFormat: force timeZone + patch resolvedOptions ----
+    function patchRO(inst) {
+      var ro = inst.resolvedOptions;
+      fakeNative(inst.resolvedOptions = function () {
+        var r = ro.apply(this, arguments);
+        r.timeZone = TZ;
+        return r;
+      }, "resolvedOptions");
+      return inst;
+    }
+    function DTF() {
+      var args = Array.prototype.slice.call(arguments);
+      if (args.length < 2 || args[1] == null) args[1] = {};
+      if (typeof args[1] === "object" && !args[1].timeZone) args[1].timeZone = TZ;
+      var inst = this instanceof DTF
+        ? new (Function.prototype.bind.apply(_RDTF, [null].concat(args)))()
+        : _RDTF.apply(null, args);
+      return patchRO(inst);
+    }
+    DTF.prototype = _RDTF.prototype;
+    DTF.supportedLocalesOf = _RDTF.supportedLocalesOf;
+    fakeNative(DTF, "DateTimeFormat");
+    Intl.DateTimeFormat = DTF;
+
+    // ---- Date.prototype.getTimezoneOffset: DST-correct ----
+    fakeNative(Date.prototype.getTimezoneOffset = function () { return offsetOf(this); }, "getTimezoneOffset");
+
+    // ---- Date.prototype.toString / toTimeString / toDateString / toLocale* ----
+    var DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    // tz long name via resolved formatter (e.g. "Pacific Daylight Time")
+    var _tzNameFmt = new _RDTF("en-US", { timeZone: TZ, timeZoneName: "long" });
+    var _tzAbbrFmt = new _RDTF("en-US", { timeZone: TZ, timeZoneName: "short" });
+    function tzNames(d) {
+      try {
+        var lo = _tzNameFmt.formatToParts(d), ab = _tzAbbrFmt.formatToParts(d), L = "", A = "";
+        for (var i = 0; i < lo.length; i++) if (lo[i].type === "timeZoneName") L = lo[i].value;
+        for (var j = 0; j < ab.length; j++) if (ab[j].type === "timeZoneName") A = ab[j].value;
+        return { long: L, abbr: A };
+      } catch (e) { return { long: TZ, abbr: TZ }; }
+    }
+    function pad(n){ return (n < 10 ? "0" : "") + n; }
+    function localString(d) {
+      var m = partsOf(d), names = tzNames(d), off = offsetOf(d);
+      var sign = off <= 0 ? "+" : "-", ao = Math.abs(off);
+      var hh = Math.floor(ao / 60), mm = ao % 60;
+      var wd = DAYS[new Date(Date.UTC(+m.year, m.month-1, +m.day)).getUTCDay()];
+      return wd + " " + MONTHS[m.month-1] + " " + pad(+m.day) + " " + m.year + " " +
+             pad((+m.hour)%24) + ":" + m.minute + ":" + m.second + " " +
+             "GMT" + sign + pad(hh) + pad(mm) + " (" + names.long + ")";
+    }
+    function timeString(d) {
+      var m = partsOf(d), names = tzNames(d), off = offsetOf(d);
+      var sign = off <= 0 ? "+" : "-", ao = Math.abs(off);
+      return pad((+m.hour)%24) + ":" + m.minute + ":" + m.second + " GMT" +
+             sign + pad(Math.floor(ao/60)) + pad(ao%60) + " (" + names.long + ")";
+    }
+    function dateString(d) {
+      var m = partsOf(d);
+      var wd = DAYS[new Date(Date.UTC(+m.year, m.month-1, +m.day)).getUTCDay()];
+      return wd + " " + MONTHS[m.month-1] + " " + pad(+m.day) + " " + m.year;
+    }
+    fakeNative(Date.prototype.toString = function () { return localString(this); }, "toString");
+    fakeNative(Date.prototype.toTimeString = function () { return timeString(this); }, "toTimeString");
+    fakeNative(Date.prototype.toDateString = function () { return dateString(this); }, "toDateString");
+    // toLocaleString family: route through Intl with TZ (honors our DTF patch automatically via locale tags)
+    var _origTLS = Date.prototype.toLocaleString, _origTLDS = Date.prototype.toLocaleDateString, _origTLTS = Date.prototype.toLocaleTimeString;
+    fakeNative(Date.prototype.toLocaleString = function () {
+      return new _RDTF(undefined, { timeZone: TZ }).format(this);
+    }, "toLocaleString");
+    fakeNative(Date.prototype.toLocaleDateString = function () {
+      return new _RDTF(undefined, { timeZone: TZ, dateStyle: "short" }).format(this);
+    }, "toLocaleDateString");
+    fakeNative(Date.prototype.toLocaleTimeString = function () {
+      return new _RDTF(undefined, { timeZone: TZ, timeStyle: "medium" }).format(this);
+    }, "toLocaleTimeString");
+
+    Object.defineProperty(window, "__MINITZ__", { value: TZ, configurable: true });
+  } catch (e) { /* swallow */ }
+})();'''
+
+
+def resolve_timezone(region_code, lat, lon):
+    """按节点坐标定 IANA 时区 (坐标级); 坐标未命中回退国家级; 再未命中 None。
+    时区表 build 时用 timezonefinder 预生成 (data/timezones.json), 运行时无依赖。"""
+    try:
+        with open(TZ_MAP_PATH, encoding="utf-8") as f:
+            tzmap = json.load(f)
+    except (OSError, ValueError):
+        return None
+    by_coords = tzmap.get("by_coords", {})
+    by_country = tzmap.get("by_country", {})
+    try:
+        key = "%.4f,%.4f" % (round(float(lat), 4), round(float(lon), 4))
+        if key in by_coords:
+            return by_coords[key]
+    except (TypeError, ValueError):
+        pass
+    return by_country.get((region_code or "").upper())
+
+
 def find_region_json(region_code):
     """在 data/regions/<CC>/... 下定位该区域的模板 json (单区域节点只装一份)。"""
     base = os.path.join(REGION_DATA_ROOT, region_code)
@@ -112,13 +241,7 @@ def load_persona(region_code, region_json_path, lang_params=None, lat=None, lon=
                 locale = hl
             break
 
-    timezone = "UTC"
-    try:
-        with open(TZ_MAP_PATH, encoding="utf-8") as f:
-            tz_map = json.load(f)
-        timezone = tz_map.get(region_code, "UTC")
-    except (OSError, ValueError):
-        pass
+    timezone = resolve_timezone(region_code, lat_v, lon_v)
 
     static_urls = template.get("trust_module", {}).get("static_urls", [])
     return {
@@ -275,8 +398,15 @@ def run_session(node, region_code, socks_port, persona, keywords, focus="all"):
     # config 仅承载持久化噪声种子 (set_into 尊重已存在键,指纹身份不被 geoip 覆盖)。
     node_config = dict(node_seeds)
 
-    log("启动会话: region=%s geoip=auto(跟随出口IP) proxy=%s"
-        % (region_code, proxy_desc))
+    # [时区对齐] 按节点坐标定 IANA (坐标级, 不用 geoip 粗判 - 实测 geoip 把 LA 判成 Chicago)。
+    # config['timezone'] 修 Worker (geoip 用 setdefault, 手动值优先);
+    # 主线程 152 build 不吃 config -> 另用 add_init_script 注入 (见下)。
+    node_tz = persona.get("timezone")
+    if node_tz:
+        node_config["timezone"] = node_tz
+
+    log("启动会话: region=%s tz=%s geoip=auto(经纬度/locale跟随出口IP) proxy=%s"
+        % (region_code, node_tz or "geoip-default", proxy_desc))
 
     with Camoufox(
         fingerprint=node_fp,
@@ -290,6 +420,13 @@ def run_session(node, region_code, socks_port, persona, keywords, focus="all"):
         headless=True,                      # 自带反 headless 伪装
         block_images=False,
     ) as browser:
+        # [主线程时区] 152 build 的 config 时区不作用于主文档 realm (实测 UTC),
+        # 用引擎级 add_init_script 强改 Intl/Date (每页每 frame 主世界执行)。Worker 由 config 覆盖。
+        if node_tz:
+            try:
+                browser.add_init_script(INIT_TZ_JS.replace("__TZ__", node_tz))
+            except Exception as e:
+                log("WARN 时区注入脚本失败: %s" % e)
         page = browser.new_page()
         page.set_default_timeout(45000)
 
