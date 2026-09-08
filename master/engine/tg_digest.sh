@@ -71,10 +71,13 @@ for chat in $CHATS; do
         [ -z "$tz" ] && tz="?"
         city=""; [ "$tz" != "?" ] && city=$(echo "$tz" | awk -F/ '{print $NF}' | tr '_' ' ')
         # 最新自检落盘
-        RF="${PROFILES}/${n}.region"; verdict="未检测"; jump=""; lastchk=""
+        RF="${PROFILES}/${n}.region"; verdict="未检测"; jump=""; lastchk=""; jgl=""; prem=""; music=""
         if [ -f "$RF" ]; then
             v=$(sed -n 's/.*"verdict": *"\([^"]*\)".*/\1/p' "$RF"); [ -n "$v" ] && verdict="$v"
             jump=$(sed -n 's/.*"jump": *"\([^"]*\)".*/\1/p' "$RF")
+            jgl=$(sed -n 's/.*"jump_gl": *"\([^"]*\)".*/\1/p' "$RF")
+            prem=$(sed -n 's/.*"prem": *"\([^"]*\)".*/\1/p' "$RF")
+            music=$(sed -n 's/.*"music": *"\([^"]*\)".*/\1/p' "$RF")
             rts=$(sed -n 's/.*"ts": *\([0-9]*\).*/\1/p' "$RF")
             [ -n "$rts" ] && lastchk=$(date -u -d "@$rts" '+%m-%d %H:%M UTC' 2>/dev/null)
         fi
@@ -95,7 +98,14 @@ for chat in $CHATS; do
         if [ "$verdict" = "未检测" ]; then
             vline="   最近自检: ⚪ 未检测"
         else
-            vline="   最近自检: ${em} ${verdict} · jump ${jump:-?} · ${lastchk:-?}"
+            case "$verdict" in
+                OK) vcn="目标达成";; WATCH) vcn="观察";; DRIFT) vcn="区域漂移";;
+                SINICIZED) vcn="送中";; *) vcn="$verdict";;
+            esac
+            vline="   最近自检: ${em} ${vcn} (Jump: ${jgl:-?} | Prem: ${prem:-?} | Music: ${music:-?})"
+            # 异常时附原始证据 (落地域名)
+            case "$verdict" in OK|PROBE_FAIL) ;; *) [ -n "$jump" ] && vline="${vline} · ${jump}";; esac
+            vline="${vline} · ${lastchk:-?}"
         fi
         card="${fl} *${alias}*  ·  ${loc}
 📡 出口 IP: \`${showip}\`  ·  🕐 \`${tz}\`

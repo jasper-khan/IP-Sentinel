@@ -1,5 +1,15 @@
 # Changelog
 
+## [v5.6.6-fork] - 2026-09-08
+
+### ✨ Features
+
+- **区域自检升级三核 (对齐上游三核雷达, 浏览器版)** — 探针从双核 (Jump+Prem) 扩为 **Jump + YouTube Premium GL + YouTube Music GL**;判定维持证据分级 (不采用上游"YT 权重容忍 Jump 漂移"):
+  - 双中文区证据 → 🔴 送中;单中文信号+其他支持目标 → 🟡 WATCH (下轮复核);单 YT=CN 无佐证 → 🔴 (维持强信号定罪);同区双漂移 → 🟠 DRIFT;三核全失效 → ⚪ PROBE_FAIL (对齐上游探针失效告警)
+  - 9 场景单元测试全过 (含酷鸭 HK 目标判 US 的 DRIFT 案例)
+- **判定历史 + 「📈 判定历史」面板 (对齐上游 /trend)** — 每轮会话追加 `profiles/<node>.verdicts.jsonl`;节点控制台新增「📈 判定历史」按钮,渲染近 15 轮 (时间/判定/Jump/Prem/Music),可观察 WATCH 自愈与送中渐进趋势。上游原有 /trend (质量探测历史) 保留不动
+- **日报自检行对齐上游国家码格式** — `🟢 目标达成 (Jump: US | Prem: US | Music: US)`,异常时附原始落地域名证据;判定中文化 (目标达成/观察/区域漂移/送中)
+
 ## [v5.6.5-fork] - 2026-09-08
 
 ### 🐛 Fixes

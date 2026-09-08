@@ -554,107 +554,138 @@ def _human_scroll(page, steps=None):
         pass
 
 
+# 目标区域 → 期望落地域名 (Jump 信号判定表; 反向用于域名→国家码展示)
+EXPECTED_DOMAINS = {
+    "US": ("www.google.com", "google.com"),
+    "HK": ("www.google.com.hk", "google.com.hk"),
+    "TW": ("www.google.com.tw", "google.com.tw"),
+    "JP": ("www.google.co.jp", "google.co.jp"),
+    "UK": ("www.google.co.uk", "google.co.uk"),
+}
+# 域名 → 国家码 (展示用反查; 未知域名原样保留)
+_DOMAIN_GL = {d: cc for cc, ds in EXPECTED_DOMAINS.items() for d in ds}
+_YT_GL_RE = re.compile(r'"(?:contentRegion|countryCode|GL)":"([A-Za-z]{2})"')
+
+
+def _domain_to_gl(domain):
+    return _DOMAIN_GL.get(domain, domain)
+
+
 def probe_region(page):
-    """三核区域探测 (移植自 mod_google 自检):
+    """三核区域探测 (对齐上游三核雷达, 浏览器版):
     - jump: google.com 落地的最终域名 (被送中 IP 会 302 到 google.com.hk)
-    - yt:   YouTube Premium 页面暴露的 contentRegion/GL
+    - prem: YouTube Premium 页面暴露的 contentRegion/GL
+    - music: YouTube Music 页面暴露的 contentRegion/GL
     """
-    result = {"jump": "", "yt": ""}
+    result = {"jump": "", "prem": "", "music": ""}
     try:
         page.goto("https://www.google.com/", wait_until="domcontentloaded")
         time.sleep(random.randint(2, 6))
         result["jump"] = urlparse(page.url).netloc
     except Exception:
         pass
-    try:
-        page.goto("https://www.youtube.com/premium", wait_until="domcontentloaded")
-        time.sleep(random.randint(2, 5))
-        m = re.search(r'"(?:contentRegion|countryCode|GL)":"([A-Za-z]{2})"', page.content())
-        if m:
-            result["yt"] = m.group(2).upper()
-    except Exception:
-        pass
+    for key, url in (("prem", "https://www.youtube.com/premium"),
+                     ("music", "https://music.youtube.com/")):
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            time.sleep(random.randint(2, 5))
+            m = _YT_GL_RE.search(page.content())
+            if m:
+                result[key] = m.group(1).upper()
+        except Exception:
+            pass
     return result
 
 
 def region_verdict(node, region_code, probe):
-    """区域判定落盘 + 漂移/送中标记 (监控层 KPI)。
+    """三核分级裁决落盘 (Jump + Prem + Music, 2026-09-08 对齐上游三核探针):
 
-    证据分级 (避免单信号定罪 — 实测曾因孤立 jump 样本误报送中):
-    - 两信号一致 → 定罪 (SINICIZED / DRIFT)
-    - 仅单信号矛盾且另一信号支持目标 → WATCH (观察,待复现)
-    - yt=CN 与 jump→com.hk 互为强证据,任一与目标冲突即升级
+    每信号独立归类: support(支持目标) / cn(中文区) / drift(漂移到别处) / fail(失效)
+    裁决 (证据分级, 保留早期预警 — 不采用上游"YT权重容忍Jump漂移"):
+      - 三核全失效          → PROBE_FAIL (疑似风控拦截)
+      - cn 证据 >= 2        → SINICIZED (双证据定罪)
+      - cn 证据 = 1 且有支持信号 → WATCH (孤立矛盾, 下轮复核)
+      - cn 证据 = 1 且无其他信号  → SINICIZED (YT判CN强信号无矛盾, 维持定罪)
+      - 漂移同区 >= 2       → DRIFT (一致跑偏, 酷鸭案例)
+      - 漂移 = 1            → WATCH
+      - 其余(全支持)        → OK
+    历史追加 <node>.verdicts.jsonl (每轮一行, /trend 面板消费);
+    最新快照仍写 <node>.region (日报消费)。
     """
     target = region_code.upper()
     jump = (probe.get("jump") or "").lower()
-    observed = probe.get("yt", "")
+    prem = (probe.get("prem") or "").upper()
+    music = (probe.get("music") or "").upper()
 
-    verdict = "OK"
-    notes = []
-
-    # 信号 1: 落地域名 (google.com → google.com.hk 是中文区重定向)
-    jump_bad = False       # jump 与目标矛盾
-    jump_sinic = False     # jump 指向中文区
+    # ---- 信号归类 ----
+    sigs = []   # (名称, 类别, 展示值)  类别: support/cn/drift/fail
     if jump:
-        expected_domains = {
-            "US": ("www.google.com", "google.com"),
-            "HK": ("www.google.com.hk", "google.com.hk"),
-            "TW": ("www.google.com.tw", "google.com.tw"),
-            "JP": ("www.google.co.jp", "google.co.jp"),
-            "UK": ("www.google.co.uk", "google.co.uk"),
-        }
-        ok_domains = expected_domains.get(target, ())
+        ok_domains = EXPECTED_DOMAINS.get(target, ())
         if jump in ("www.google.com.hk", "google.com.hk") and "google.com.hk" not in ok_domains:
-            jump_sinic = True
-            notes.append("jump→com.hk")
-        elif ok_domains and jump not in ok_domains:
-            jump_bad = True
-            notes.append("jump→" + jump)
-        elif not ok_domains and jump not in ("www.google.com", "google.com"):
-            jump_bad = True
-            notes.append("jump→" + jump)
+            sigs.append(("Jump", "cn", _domain_to_gl(jump)))
+        elif ok_domains and jump in ok_domains:
+            sigs.append(("Jump", "support", target))
+        elif not ok_domains and jump in ("www.google.com", "google.com"):
+            sigs.append(("Jump", "support", "US"))
+        else:
+            sigs.append(("Jump", "drift", _domain_to_gl(jump)))
+    else:
+        sigs.append(("Jump", "fail", "?"))
+    for name, val in (("Prem", prem), ("Music", music)):
+        if not val:
+            sigs.append((name, "fail", "?"))
+        elif val == "CN" and target != "CN":
+            sigs.append((name, "cn", val))
+        elif val == target:
+            sigs.append((name, "support", val))
+        else:
+            sigs.append((name, "drift", val))
 
-    # 信号 2: YouTube contentRegion
-    yt_bad = False
-    yt_sinic = False
-    if observed == "CN":
-        yt_sinic = True
-        notes.append("yt=CN")
-    elif observed and observed != target:
-        yt_bad = True
-        notes.append("yt=" + observed)
+    cats = [c for _, c, _ in sigs]
+    cn_n = cats.count("cn")
+    support_n = cats.count("support")
+    avail = len(sigs) - cats.count("fail")
 
-    # 证据合成
-    # - yt=CN: 最强单信号,YouTube 明确判 CN → 直接定罪
-    # - jump→中文区: yt 佐证漂移→定罪; yt 支持目标或未测→观察
-    # - 双信号一致漂移 → DRIFT (酷鸭: jump=US yt=US 目标 HK)
-    # - 单信号漂移且另一信号缺失/支持目标 → WATCH
-    if yt_sinic:
+    # ---- 分级裁决 ----
+    if avail == 0:
+        verdict = "PROBE_FAIL"
+    elif cn_n >= 2:
         verdict = "SINICIZED"
-    elif jump_sinic:
-        verdict = "SINICIZED" if yt_bad else "WATCH"
-    elif jump_bad and yt_bad:
-        verdict = "DRIFT"
-    elif jump_bad:
-        verdict = "WATCH" if (not observed or observed == target) else "DRIFT"
-    elif yt_bad:
-        verdict = "DRIFT" if jump else "WATCH"
+    elif cn_n == 1:
+        verdict = "WATCH" if support_n >= 1 else "SINICIZED"
+    else:
+        # 漂移判定: 非目标、非中文区的漂移信号, 同区 >=2 → DRIFT
+        drift_gls = [v for _, c, v in sigs if c == "drift"]
+        same_drift = any(drift_gls.count(g) >= 2 for g in set(drift_gls))
+        if same_drift:
+            verdict = "DRIFT"
+        elif drift_gls:
+            verdict = "WATCH"
+        else:
+            verdict = "OK"
 
-    log("区域自检: target=%s Jump=%s YT=%s -> %s%s"
-        % (target, jump or "unknown", observed or "unknown", verdict,
-           (" (" + ",".join(notes) + ")") if notes else ""))
+    sig_str = " | ".join("%s:%s" % (n, v) for n, _, v in sigs)
+    log("区域自检: target=%s %s -> %s" % (target, sig_str, verdict))
 
-    # 落盘最新判定 (供 TG 告警/趋势展示消费)
+    # ---- 落盘: 最新快照 (.region) + 历史追加 (.verdicts.jsonl) ----
     state = {
         "target": target,
         "jump": probe.get("jump"),
-        "yt": observed,
+        "jump_gl": _domain_to_gl(jump) if jump else "",
+        "prem": prem,
+        "music": music,
         "verdict": verdict,
         "ts": int(time.time()),
     }
     try:
         with open(os.path.join(PROFILE_ROOT, "%s.region" % node), "w", encoding="utf-8") as f:
             json.dump(state, f)
+    except OSError:
+        pass
+    try:
+        import json as _json
+        with open(os.path.join(PROFILE_ROOT, "%s.verdicts.jsonl" % node), "a", encoding="utf-8") as f:
+            f.write(_json.dumps(state, ensure_ascii=False) + chr(10))
     except OSError:
         pass
     return verdict

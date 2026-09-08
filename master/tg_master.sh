@@ -781,6 +781,43 @@ while true; do
                     fi
                     ;;
 
+                "vhist:"*)
+                    TARGET_NODE=$(echo "${TEXT#*:}" | tr -cd 'a-zA-Z0-9_.-')
+                    CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
+                    VJ="${MASTER_DIR}/profiles/${TARGET_NODE}.verdicts.jsonl"
+                    if [ ! -s "$VJ" ]; then
+                        render_msg "$CHAT_ID" "$MSG_ID" "⚠️ 节点 \`${TARGET_NODE}\` 暂无养护判定历史 (会话结束后自动积累)。"
+                    else
+                        TARGET_ALIAS=$(db_exec "SELECT IFNULL(node_alias, node_name) FROM nodes WHERE chat_id='${CHAT_ID}' AND node_name='${TARGET_NODE}' LIMIT 1;")
+                        [ -z "$TARGET_ALIAS" ] && TARGET_ALIAS="$TARGET_NODE"
+                        TEXT_RES="📈 *[${TARGET_ALIAS}] 区域判定历史 (近15轮)*
+
+"
+                        TEXT_RES+="时间(UTC)      | 判定 | Jump | Prem | Music
+"
+                        TEXT_RES+="------------------------------------------
+"
+                        while IFS= read -r line; do
+                            v_ts=$(echo "$line" | jq -r '.ts // 0')
+                            v_ver=$(echo "$line" | jq -r '.verdict // "?"')
+                            v_j=$(echo "$line" | jq -r '.jump_gl // "?"')
+                            v_p=$(echo "$line" | jq -r '.prem // "?"')
+                            v_m=$(echo "$line" | jq -r '.music // "?"')
+                            v_t=$(date -u -d "@${v_ts}" '+%m-%d %H:%M' 2>/dev/null || echo "??-?? ??:??")
+                            case "$v_ver" in
+                                OK) v_em="🟢";; WATCH) v_em="🟡";; DRIFT) v_em="🟠";;
+                                SINICIZED) v_em="🔴";; *) v_em="⚪";;
+                            esac
+                            TEXT_RES+="\`${v_t}\` | ${v_em}\`${v_ver}\` | \`${v_j}\` | \`${v_p}\` | \`${v_m}\`
+"
+                        done <<< "$(tail -n 15 "$VJ" | tac)"
+                        TEXT_RES+="
+_💡 三核 = Jump(google落地) / Prem / Music(YouTube官方GL)。🔴送中 🟠漂移 🟡观察。_"
+                        BTNS="[[{\"text\":\"⚙️ 调出该节点控制台\",\"callback_data\":\"manage:${TARGET_NODE}\"}]]"
+                        render_ui "$CHAT_ID" "$MSG_ID" "$TEXT_RES" "$BTNS"
+                    fi
+                    ;;
+
                 "/trend"|"/trend@"*)
                     TARGET_NODE=$(echo "$TEXT" | awk '{print $2}')
                     if [ -z "$TARGET_NODE" ]; then
@@ -902,9 +939,9 @@ while true; do
                     fi
 
                     if [ "$IS_OFFICIAL_GATEWAY" != "true" ] && [ "$ST_OTA" == "true" ]; then
-                        BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}, {\"text\":\"🆙 OTA 静默升级\",\"callback_data\":\"ota_confirm:$TARGET_NODE\"}]"
+                        BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}, {\"text\":\"🆙 OTA 静默升级\",\"callback_data\":\"ota_confirm:$TARGET_NODE\"}, {\"text\":\"📈 判定历史\",\"callback_data\":\"vhist:$TARGET_NODE\"}]"
                     else
-                        BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}]"
+                        BTN_CONFIG="[{\"text\":\"✏️ 更改终端展示代号\",\"callback_data\":\"rename:$TARGET_NODE\"}, {\"text\":\"📈 判定历史\",\"callback_data\":\"vhist:$TARGET_NODE\"}]"
                     fi
 
                     BTN_DANGER="[{\"text\":\"🗑️ 从中枢销毁该档案\",\"callback_data\":\"del_confirm:$TARGET_NODE\"}, {\"text\":\"⬅️ 返回战区列表\",\"callback_data\":\"list_nodes\"}]"
