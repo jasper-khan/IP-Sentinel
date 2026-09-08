@@ -139,3 +139,29 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 - tag 未发布 (bump 未打 tag) → MANIFEST 拉取失败 → 熔断告警
 - 本地版本 ≥ 远端 → 跳过并回执 (Agent TG 通知 / Master TG 通知)
 - 验签失败 → 熔断告警, 不执行
+
+---
+
+# v5.6.2 - v5.6.6 发版测试 (2026-09-08, 002)
+
+## v5.6.2 时区修复
+- 探针实测(002, 真实页面非about:blank): 主线程恒UTC(152 build主文档realm bug), Worker吃config(PR#563实锤), add_init_script吃主线程 → 双realm互补方案
+- E2E: 主线程+Worker均America/Los_Angeles(off 420 PDT); 真实会话 tz对齐+rc=0
+
+## v5.6.3/5.6.4 每日简报双维度 + IP净化修复
+- **净化bug发现**: 白名单static_urls在curl→浏览器迁移时投递漏接, 部署以来净化从未执行
+- 修后E2E: 会话恢复白名单深访(walmart/dallasnews/foxnews), wl_US由调度器全新装机自动拉取
+- 简报TG ok:true, 双维度真实数据
+
+## v5.6.5 TOFU PSK挑战根治
+- 受控失配E2E: 假指纹→/challenge PSK_ACK→自动重锁真实指纹, 零人工
+- 两侧摘要算法一致性验证 (sha256(psk|node)[:16] == bash版)
+
+## v5.6.6 三核+判定历史
+- 9场景裁决单测全过 (含酷鸭HK目标判US=DRIFT, 孤立中文信号=WATCH, 无佐证YT-CN=定罪)
+- E2E: 三核全通(Jump/Prem/Music=US), verdicts.jsonl落盘, 日报国家码格式, rc=0
+- MUSIC探针在music.youtube.com提取contentRegion成功
+
+## 附带发现
+- 002混用资源竞争: UAV下载流水线与浏览器会话撞车时2G内存swap抖动(60MB/s), 会话拖慢至20min; UAV删除后基线356M, 可用1623M
+- termark高频SSH连接风暴(已知): 低频轮询+单查模式规避
