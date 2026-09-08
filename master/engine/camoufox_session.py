@@ -36,6 +36,7 @@ ENGINE_LOG = os.path.join(MASTER_DIR, "logs", "engine.log")
 # Camoufox 可选区域模板根 (安装器随引擎一并拉取)
 REGION_DATA_ROOT = os.path.join(MASTER_DIR, "data", "regions")
 KEYWORDS_ROOT = os.path.join(MASTER_DIR, "data", "keywords")
+WHITELIST_ROOT = os.path.join(MASTER_DIR, "data", "whitelist")
 
 NODE = "-"   # 由 main() 按 --node 覆盖
 
@@ -243,7 +244,8 @@ def load_persona(region_code, region_json_path, lang_params=None, lat=None, lon=
 
     timezone = resolve_timezone(region_code, lat_v, lon_v)
 
-    static_urls = template.get("trust_module", {}).get("static_urls", [])
+    # static_urls: 优先按需拉取的国家白名单 (master 无区域模板), 回退模板
+    static_urls = load_whitelist(region_code) or template.get("trust_module", {}).get("static_urls", [])
     return {
         "locale": locale,
         "timezone": timezone,
@@ -260,6 +262,16 @@ def load_keywords(region_code):
     with open(path, encoding="utf-8", errors="ignore") as f:
         kws = [line.strip() for line in f if line.strip()]
     return kws
+
+
+def load_whitelist(region_code):
+    """按国家读白名单站点 (IP 信用净化深访目标)。调度器按需拉 wl_<CC>.txt
+    (curl->浏览器迁移时 static_urls 投递漏接的补齐: 白名单为全国性站点, 不分城市)。"""
+    path = os.path.join(WHITELIST_ROOT, "wl_%s.txt" % region_code)
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        return [line.strip() for line in f if line.strip().startswith("http")]
 
 
 def human_dwell(min_s=20, max_s=70):

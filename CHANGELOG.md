@@ -1,5 +1,19 @@
 # Changelog
 
+## [v5.6.4-fork] - 2026-09-08
+
+### 🐛 Fixes
+
+- **修复 IP 信用净化一直未执行 (curl→浏览器迁移的数据投递漏接)** — 净化深访目标 `static_urls` 来自区域模板 `trust_module`,curl 时代模板随装机拉到 agent 本地;养护搬到 Master 引擎后,模板既没随注册报文送来、调度器也只拉了关键词 (没拉白名单),导致引擎 `static_urls=[]`、白名单深访被跳过——**部署以来只跑了 Google 区域纠偏,IP 信用净化从未执行**。修复: 新增按国家白名单 `data/whitelist/wl_<CC>.txt` (从区域模板 static_urls 聚合,全国性站点不分城市),调度器 `ensure_whitelist` 按需拉取 (完全仿 `ensure_keywords`),引擎 `load_whitelist` 读取。002 实测: 会话恢复白名单深访 (foxnews/visitbuffaloniagara 等),rc=0
+
+### ✨ Features
+
+- **每日养护简报增强为上游双维度结构** — 对齐上游"每日简报"的两大产品维度 (Camoufox 引擎驱动):
+  - 🎯 **Google 区域纠偏**: 24h 养护会话数 · 区域自检达成率 (✅达成 / 🔴送中漂移) · 最新自检结论 (jump 落地域名 + 时间)
+  - 🔰 **IP 信用净化**: 24h 白名单深访次数
+  - 每节点独立卡片 (国旗 + 区域/城市 + 出口 IP + 时区),全局汇总纠偏/净化总数 + 异常告警,底部战报时间 + 引擎版本
+  - `DIGEST_DRYRUN=1` 预览不发送
+
 ## [v5.6.3-fork] - 2026-09-08
 
 ### ✨ Features

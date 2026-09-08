@@ -20,13 +20,14 @@ LOG_FILE="${MASTER_DIR}/logs/engine.log"
 STATE_DIR="${MASTER_DIR}/.engine_state"
 PORT_MAP_FILE="${MASTER_DIR}/.tunnel_ports"
 KEYWORDS_DIR="${MASTER_DIR}/data/keywords"
+WHITELIST_DIR="${MASTER_DIR}/data/whitelist"
 REPO_RAW_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
 
 ENGINE_CONCURRENCY="${ENGINE_CONCURRENCY:-2}"
 ENGINE_MIN_INTERVAL="${ENGINE_MIN_INTERVAL:-5400}"
 SESSION_TIMEOUT=1800
 
-mkdir -p "${STATE_DIR}" "${MASTER_DIR}/logs" "${KEYWORDS_DIR}"
+mkdir -p "${STATE_DIR}" "${MASTER_DIR}/logs" "${KEYWORDS_DIR}" "${WHITELIST_DIR}"
 
 log() {
     echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] [Schedul] $*" >> "$LOG_FILE"
@@ -43,6 +44,15 @@ ensure_keywords() {
     [ -s "$kw_file" ] && return 0
     curl -fsSL --connect-timeout 10 --retry 2 "${REPO_RAW_URL}/data/keywords/kw_${region}.txt" \
         -o "$kw_file" 2>/dev/null || { rm -f "$kw_file"; log "WARN kw_${region}.txt 拉取失败,会话将无关键词"; }
+}
+
+# [persona 配套] 节点区域白名单 (IP 信用净化深访目标) 缺失时按需拉取
+ensure_whitelist() {
+    local region="$1"
+    local wl_file="${WHITELIST_DIR}/wl_${region}.txt"
+    [ -s "$wl_file" ] && return 0
+    curl -fsSL --connect-timeout 10 --retry 2 "${REPO_RAW_URL}/data/whitelist/wl_${region}.txt" \
+        -o "$wl_file" 2>/dev/null || { rm -f "$wl_file"; log "WARN wl_${region}.txt 拉取失败,净化将无白名单"; }
 }
 
 # 节点端口查询 (隧道管理器维护的持久映射)
@@ -87,6 +97,7 @@ launch_session() {
     fi
 
     ensure_keywords "$region"
+    ensure_whitelist "$region"
 
     log "节点 ${n} 进入会话 (focus=${focus:-all}, region=${region}, proxy=${port:-local})"
 
