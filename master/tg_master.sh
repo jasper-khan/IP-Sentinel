@@ -194,13 +194,36 @@ call_agent() {
     IFS=',' read -r -a ip_array <<< "$clean_ips"
     for ip in "${ip_array[@]}"; do
         if [ -n "$ip" ]; then
-            # [TOFU] 证书指纹校验：不匹配即中止该节点通讯 (防 MITM)
+            # [TOFU] 证书指纹校验 (防 MITM):
+            #   匹配/首次 → 放行; 不匹配 → PSK 挑战判定 (见下)。
+            # [Safe TOFU] 指纹失配不再直接判 MITM: Agent OTA 会重铸自签证书, 若升级
+            # 时序是"Agent 先升/Master 后升", 轮换注册落在旧 Master 上被错过 →
+            # 之后 Agent 因版本守卫不再注册, 指纹永久失配 (升级顺序窗口)。
+            # 判定法: 经当前 TLS 连接发 PSK 签名的 /challenge, Agent 回显
+            # sha256(PSK|NODE_NAME) 前 16 位; 伪造该应答需持有 PSK。
+            # 转发型 MITM 只能转述真 Agent 的应答 (危害上限=可见性, 指令
+            # 仍需 PSK 签名无法伪造), 与合法轮换不可区分——按设计放行。
+            # 应答不符/无应答 → 维持 MITM 告警中止。
             verify_agent_tls "$ip" "$port" "$node_key"
             TLS_RC=$?
             if [ "$TLS_RC" -eq 1 ]; then
-                send_msg "$CHAT_ID" "🚨 **[安全告警] 节点 \`${node_key}\` (${ip}) 证书指纹与锁定值不符！疑似中间人攻击，本次指令已中止。**"
-                echo "FAILED_TLS_MISMATCH"
-                return
+                local ch_url ch_ack expect
+                ch_url=$(generate_signed_url "$ip" "$port" "/challenge" "" "$node_psk")
+                ch_ack=$(curl -k -s --connect-timeout 5 -m 10 "$ch_url" 2>/dev/null | head -n 1)
+                expect=$(printf '%s|%s' "$node_psk" "$node_key" | sha256sum | cut -c1-16)
+                if [ "$ch_ack" = "PSK_ACK|${expect}" ]; then
+                    # 节点证明持有 PSK → 视为合法证书轮换, 重锁新指纹后重发原指令
+                    local new_fp
+                    new_fp=$(echo | openssl s_client -connect "${ip}:${port}" -servername "agent" 2>/dev/null                         | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d'=' -f2 | tr -d ':')
+                    if [ -n "$new_fp" ]; then
+                        db_exec "UPDATE nodes SET cert_fp='${new_fp}' WHERE chat_id='${CHAT_ID}' AND node_name='${node_key}';"
+                        send_msg "$CHAT_ID" "🔄 节点 \`${node_key}\` 证书变化经 PSK 挑战验证为合法轮换 (疑似 OTA 升级), 指纹已自动重锁。"
+                    fi
+                else
+                    send_msg "$CHAT_ID" "🚨 **[安全告警] 节点 \`${node_key}\` (${ip}) 证书指纹与锁定值不符且 PSK 挑战验证失败！疑似中间人攻击，本次指令已中止。**"
+                    echo "FAILED_TLS_MISMATCH"
+                    return
+                fi
             fi
 
             local url_v2=$(generate_signed_url "$ip" "$port" "$path" "$extra_q" "$node_psk")

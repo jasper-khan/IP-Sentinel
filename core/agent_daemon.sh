@@ -248,6 +248,30 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"Action Accepted: tg_report\n")
             os.system("nohup bash /opt/ip_sentinel/core/tg_report.sh >/dev/null 2>&1 &")
 
+        # 路由 3.5: PSK 持有性挑战 (TOFU 轮换验证)
+        # 到达此处必已通过 HMAC 中间件 (合法 PSK 签名); 回显 PSK+NODE 摘要供
+        # Master 核对——伪造响应需持有 PSK, 转发型 MITM 只能转述真 Agent 应答
+        # (其危害上限为可见性, 无法伪造破坏性指令)。用于证书指纹变化时判别
+        # 合法轮换 (OTA 重铸证书) vs MITM。
+        elif req_path == '/challenge':
+            import hashlib as _ha
+            _psk = AUTH_TOKEN
+            _nn = ''
+            try:
+                if os.path.exists('/opt/ip_sentinel/config.conf'):
+                    with open('/opt/ip_sentinel/config.conf', 'r', errors='ignore') as f:
+                        for _ln in f:
+                            if _ln.startswith('NODE_NAME='):
+                                _nn = _ln.split('=', 1)[1].strip().strip('"' + chr(39))
+                                break
+            except OSError:
+                pass
+            _ack = _ha.sha256((_psk + '|' + _nn).encode()).hexdigest()[:16]
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(f"PSK_ACK|{_ack}".encode('utf-8'))
+
         # 路由 4: 获取并回传实时日志切片
         elif req_path == '/trigger_log':
             self.send_response(200)
