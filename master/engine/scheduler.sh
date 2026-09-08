@@ -96,6 +96,14 @@ launch_session() {
         port=""
     fi
 
+    # [出口保真] 远程节点必须有活隧道端口: 隧道未就绪时跳过本轮并告警——
+    # 绝不静默回退本机出口 (那会把 Master 的 IP 重复养护, 目标节点失养而无察觉)
+    if ! is_local_node "$node_ip" && [ -z "$port" ]; then
+        log "WARN 节点 ${n} 隧道未就绪(无端口映射), 跳过本轮养护: ${n} 未被本机出口冒名养护"
+        echo "$(date +%s)" > "${STATE_DIR}/${n}.last"
+        return 1
+    fi
+
     ensure_keywords "$region"
     ensure_whitelist "$region"
 

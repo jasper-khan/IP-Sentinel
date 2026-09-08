@@ -921,10 +921,10 @@ _💡 三核 = Jump(google落地) / Prem / Music(YouTube官方GL)。🔴送中 �
                     A_IP=$(echo "$TOGGLE_INFO" | cut -d'|' -f2)
                     LAST_SEEN=$(echo "$TOGGLE_INFO" | cut -d'|' -f3)
 
-                    # [区域自检状态] (引擎会话落盘的判定)
-                    REGION_STATE="(无)"
+                    # [区域自检状态] (引擎会话落盘的三核判定, 样式对齐日报)
+                    REGION_STATE="⚪ 暂无数据 (首轮会话后自动生成)"
                     [ -f "${MASTER_DIR}/profiles/${TARGET_NODE}.region" ] && \
-                        REGION_STATE=$(jq -r '.verdict + " (jump=" + (.jump // "?") + ")"' "${MASTER_DIR}/profiles/${TARGET_NODE}.region" 2>/dev/null)
+                        REGION_STATE=$(jq -r '. as $d | ($d.verdict // "?") as $v | ({"OK":"🟢 目标达成","WATCH":"🟡 观察","DRIFT":"🟠 区域漂移","SINICIZED":"🔴 送中","PROBE_FAIL":"⚪ 探针失效"}[$v]) // ("⚪ " + $v) | . + " (Jump: " + ($d.jump_gl // "?") + " | Prem: " + ($d.prem // "?") + " | Music: " + ($d.music // "?") + ")" + (if ($d.ts // 0) > 0 then "\n🕒 最近检测: " + (($d.ts | todate) as $t | ($t[5:10] + " " + $t[11:16])) + " UTC" else "" end)' "${MASTER_DIR}/profiles/${TARGET_NODE}.region" 2>/dev/null)
 
                     # 触发按钮 (引擎版: 写触发文件, 调度器 45-90s 内执行)
                     BTN_ACTION="[{\"text\":\"📍 触发 Google 纠偏\",\"callback_data\":\"google:$TARGET_NODE\"}, {\"text\":\"🛡️ 触发信用净化\",\"callback_data\":\"trust:$TARGET_NODE\"}], [{\"text\":\"🔍 投放深海声呐 (查IP质量)\",\"callback_data\":\"quality:$TARGET_NODE\"}, {\"text\":\"📈 查看 IP 污染趋势图\",\"callback_data\":\"trend:$TARGET_NODE\"}], [{\"text\":\"📜 提取终端实时日志\",\"callback_data\":\"log:$TARGET_NODE\"}, {\"text\":\"📊 生成单机战报\",\"callback_data\":\"report:$TARGET_NODE\"}]"

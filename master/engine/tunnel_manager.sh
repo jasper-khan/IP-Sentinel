@@ -77,10 +77,13 @@ spawn_tunnel() {
     local port
     port=$(alloc_port "$n")
 
+    # [双栈修复] DB 的 agent_ip 是多宿主串 "v4_[v6]" (多 IP 弹匣), ssh 只能连单一
+    # 主机: 取第一段为主通讯地址 (注册时 SAFE_COMM_IP 排序, v4 优先)
+    local connect_host="${ip%%_*}"
+
     # SSH 字面 IPv6 需要方括号
-    local connect_host="$ip"
-    if [[ "$ip" == *":"* && "$ip" != *"]"* ]]; then
-        connect_host="[${ip}]"
+    if [[ "$connect_host" == *":"* && "$connect_host" != *"]"* ]]; then
+        connect_host="[${connect_host}]"
     fi
 
     ssh -i "$TUNNEL_KEY" \
