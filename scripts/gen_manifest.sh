@@ -32,6 +32,7 @@ PATHS=(
     "master/engine/camoufox_session.py"
     "master/engine/tunnel_manager.sh"
     "master/engine/scheduler.sh"
+    "master/engine/tg_digest.sh"
     "data/probe/ip.sh"
     "version.txt"
 )

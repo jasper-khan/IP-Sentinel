@@ -1,5 +1,15 @@
 # Changelog
 
+## [v5.6.3-fork] - 2026-09-08
+
+### ✨ Features
+
+- **每日养护简报 (Master 侧重建)** — 恢复上游"每日简报"能力,但重建在 Master 引擎侧: curl 退役后养护数据从 agent 本地搬到 Master 引擎,agent 侧日报只剩空壳 (代码曾注释"养护统计由 Master 引擎日志承载"却未实现)。新增 `master/engine/tg_digest.sh` + `ip-sentinel-digest.timer` (每日 16:00 UTC),聚合引擎养护活动按 chat_id 分组发 TG:
+  - 逐节点: 别名/区域、IP、时区、24h 养护会话数 (成功数)、最新区域自检结论 (🟢OK/🟡WATCH/🟠DRIFT/🔴送中)
+  - 全局: 节点总数、24h 养护总数、异常节点告警
+  - 数据源: `engine.log` (会话/时间戳) + `profiles/*.region` (自检落盘) + DB (节点档案),纯读取零新依赖
+- 引擎侧改动,Agent 不受影响 (仅 bump MASTER_VERSION)
+
 ## [v5.6.2-fork] - 2026-09-08
 
 ### ✨ Features

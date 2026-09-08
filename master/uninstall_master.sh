@@ -48,6 +48,9 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl kill --signal=SIGKILL ip-sentinel-tunnels.service ip-sentinel-engine.service >/dev/null 2>&1 || true
     systemctl disable --now ip-sentinel-tunnels.service ip-sentinel-engine.service >/dev/null 2>&1
     rm -f /etc/systemd/system/ip-sentinel-tunnels.service /etc/systemd/system/ip-sentinel-engine.service
+    # [简报配套] 每日养护简报定时器
+    systemctl disable --now ip-sentinel-digest.timer >/dev/null 2>&1
+    rm -f /etc/systemd/system/ip-sentinel-digest.timer /etc/systemd/system/ip-sentinel-digest.service
     systemctl daemon-reload
     systemctl reset-failed
 else

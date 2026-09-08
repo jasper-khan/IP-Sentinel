@@ -76,13 +76,13 @@ do_engine_setup() {
 
     # ---------- 3. 引擎文件 ----------
     mkdir -p "${MASTER_DIR}/engine" "${MASTER_DIR}/data" "${MASTER_DIR}/profiles" "${MASTER_DIR}/logs"
-    for f in camoufox_session.py tunnel_manager.sh scheduler.sh; do
+    for f in camoufox_session.py tunnel_manager.sh scheduler.sh tg_digest.sh; do
         curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/master/engine/${f}?t=$(date +%s)" \
             -o "${MASTER_DIR}/engine/${f}" || {
             echo -e "\033[33m⚠️ 引擎文件 ${f} 拉取失败。\033[0m"
         }
     done
-    chmod +x "${MASTER_DIR}/engine/tunnel_manager.sh" "${MASTER_DIR}/engine/scheduler.sh" 2>/dev/null
+    chmod +x "${MASTER_DIR}/engine/tunnel_manager.sh" "${MASTER_DIR}/engine/scheduler.sh" "${MASTER_DIR}/engine/tg_digest.sh" 2>/dev/null
 
     # ---------- 4. 引擎数据 ----------
     # 时区表 (persona 用); 区域模板/关键词/坐标由注册报文携带 + 调度器按需拉取,
@@ -130,9 +130,34 @@ Nice=10
 WantedBy=multi-user.target
 EOF
 
+        cat > /etc/systemd/system/ip-sentinel-digest.service << EOF
+[Unit]
+Description=IP-Sentinel Daily Nurture Digest
+After=network-online.target ip-sentinel-master.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash ${MASTER_DIR}/engine/tg_digest.sh
+User=root
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+EOF
+
+        cat > /etc/systemd/system/ip-sentinel-digest.timer << EOF
+[Unit]
+Description=Timer for IP-Sentinel Daily Nurture Digest
+[Timer]
+OnCalendar=*-*-* 16:00:00 UTC
+Persistent=true
+Unit=ip-sentinel-digest.service
+[Install]
+WantedBy=timers.target
+EOF
+
         systemctl daemon-reload
         systemctl enable --now ip-sentinel-tunnels.service >/dev/null 2>&1
         systemctl enable --now ip-sentinel-engine.service >/dev/null 2>&1
+        systemctl enable --now ip-sentinel-digest.timer >/dev/null 2>&1
         systemctl restart ip-sentinel-tunnels.service >/dev/null 2>&1
         systemctl restart ip-sentinel-engine.service >/dev/null 2>&1
     else
