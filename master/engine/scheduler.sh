@@ -138,6 +138,8 @@ consume_trigger() {
     local focus
     focus=$(cat "$trig" 2>/dev/null | head -n 1 | tr -cd 'a-z')
     [ -z "$focus" ] && focus="all"
+    # [调度取证] 触发文件写入时刻 (排查非按钮来源的触发)
+    log "触发消费: focus=$focus file_mtime=$(stat -c '%y' "$trig" 2>/dev/null | cut -d. -f1)"
     rm -f "$trig"
     if node_running "$n"; then
         log "节点 ${n} 手动触发: 会话进行中,触发并入下一轮"
@@ -184,6 +186,8 @@ while true; do
                 continue
             fi
 
+            # [调度取证] 间隔门禁放行判据
+            log "间隔调度: last=$LAST age=${AGE}s slots=$SLOTS"
             launch_session "$n" "$region" "$lang_params" "$lat" "$lon" "$node_ip" "all"
             SLOTS=$((SLOTS - 1))
         done <<< "$NODES"
