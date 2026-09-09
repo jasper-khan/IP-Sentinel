@@ -55,10 +55,16 @@ save_port_map() {
     chmod 600 "$PORT_MAP_FILE"
 }
 
+# [全局结果变量] alloc_port 把端口写这里 (不用 echo+command substitution:
+# 那会 fork 子 shell, NODE_PORTS 数组赋值随子 shell 蒸发, 父进程永不回放——
+# 历史 bug: 6 节点连续 spawn 时 port map 每次被子 shell 的"空数组+1"覆盖,
+# 最终文件只剩最后 spawn 的节点, 其余节点映射永久丢失 → 调度器判"隧道未就绪")
+ALLOC_PORT=""
+
 alloc_port() {
     local n="$1"
     if [ -n "${NODE_PORTS[$n]:-}" ]; then
-        echo "${NODE_PORTS[$n]}"
+        ALLOC_PORT="${NODE_PORTS[$n]}"
         return
     fi
     local p=$((BASE_PORT + RANDOM % 400))
@@ -68,14 +74,15 @@ alloc_port() {
     done
     NODE_PORTS["$n"]="$p"
     save_port_map
-    echo "$p"
+    ALLOC_PORT="$p"
 }
 
 spawn_tunnel() {
     local n="$1" ip="$2" ssh_port="$3"
     local user="$4"
     local port
-    port=$(alloc_port "$n")
+    alloc_port "$n"
+    port="$ALLOC_PORT"
 
     # [双栈修复] DB 的 agent_ip 是多宿主串 "v4_[v6]" (多 IP 弹匣), ssh 只能连单一
     # 主机: 取第一段为主通讯地址 (注册时 SAFE_COMM_IP 排序, v4 优先)
