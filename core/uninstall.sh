@@ -154,6 +154,43 @@ fi
 # ----------------------------------------------------------
 echo "[5/5] 正在抹除核心程序、配置文件与系统痕迹..."
 
+# [隧道链路自愈配套] 撤除安装器加的两类挂载点 (只清自己写的, 规格对称)
+#   1) sshd_config 的 Match 例外块: 按标识注释精确摘 3 行, 不碰 sshd 其他任何行
+#   2) Master 限源放行的 SSH 端口规则: 与安装器写入规格逐字对称
+if [ -f /etc/ssh/sshd_config ] && grep -q "^# \[IP-Sentinel\] tunnel-user pubkey exception" /etc/ssh/sshd_config 2>/dev/null; then
+    MARK_LINE=$(grep -n "^# \[IP-Sentinel\] tunnel-user pubkey exception" /etc/ssh/sshd_config | head -1 | cut -d: -f1)
+    [ -n "$MARK_LINE" ] && sed -i "${MARK_LINE},$((MARK_LINE + 2))d" /etc/ssh/sshd_config
+    if sshd -t 2>/dev/null; then
+        systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1 || true
+        echo -e " ✅ \033[32msshd 隧道用户公钥例外已按标识摘除 (全局策略未动)。\033[0m"
+    else
+        echo -e " ⚠️ \033[33msshd 摘除后语法异常, 未 reload, 请人工检查 /etc/ssh/sshd_config。\033[0m"
+    fi
+fi
+if [ -n "$MASTER_EGRESS_IP" ] && [ "$MASTER_EGRESS_IP" != "127.0.0.1" ]; then
+    SSH_PORT_U=$(grep "^SSH_PORT=" "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f2)
+    [ -z "$SSH_PORT_U" ] && SSH_PORT_U="22"
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -qw active; then
+        ufw delete allow from "$MASTER_EGRESS_IP" to any port "$SSH_PORT_U" proto tcp >/dev/null 2>&1
+        echo -e " ✅ \033[32mUFW 已撤除 Master→SSH:$SSH_PORT_U 限源放行。\033[0m"
+    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld | grep -qw active; then
+        firewall-cmd --quiet --permanent --remove-rich-rule="rule family=ipv4 source address=\"$MASTER_EGRESS_IP\" port port=\"$SSH_PORT_U\" protocol=\"tcp\" accept" >/dev/null 2>&1
+        firewall-cmd --quiet --reload >/dev/null 2>&1
+        echo -e " ✅ \033[32mFirewalld 已撤除 Master→SSH:$SSH_PORT_U 限源放行。\033[0m"
+    else
+        if command -v iptables >/dev/null 2>&1; then
+            while iptables -C INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT_U" -j ACCEPT >/dev/null 2>&1; do
+                iptables -D INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT_U" -j ACCEPT
+            done
+        fi
+        if command -v ip6tables >/dev/null 2>&1; then
+            while ip6tables -C INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT_U" -j ACCEPT >/dev/null 2>&1; do
+                ip6tables -D INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT_U" -j ACCEPT
+            done
+        fi
+    fi
+fi
+
 # [引擎配套] 撤销浏览器引擎隧道账户 (仅转发账户,无数据)
 TUNNEL_USER="sentinel-tunnel"
 if id "$TUNNEL_USER" >/dev/null 2>&1; then

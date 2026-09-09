@@ -1304,6 +1304,86 @@ if [[ -n "$TG_TOKEN" ]]; then
     echo -e "\n\033[31m⚠️ 【通信锁定】指令端口 $AGENT_PORT 已限源 Master ($MASTER_EGRESS_IP)；云服务商安全组请同样仅放行该来源！\033[0m"
     echo -e "\033[31m⛔ 本系统已开启全域双栈监听，禁止尝试通过修改脚本强行绑定局域网 IP 来绕过通信阻断！\033[0m\n"
 fi
+# ----------------------------------------------------------
+# [隧道链路自愈] Master 经 SSH 借道本机出口: 三道关卡逐关修复
+#   ① 防火墙限源放行 SSH 端口 (ufw → firewalld → iptables 三档)
+#   ② sshd 全局拒公钥时, 仅隧道用户开 Match 例外 (全局策略不动)
+#   ③ sshd -t 语法自检通过才 reload, 失败自动摘除回滚
+# 触发条件: 隧道账户已装载公钥且 Master 为远程机
+# ----------------------------------------------------------
+if id "$TUNNEL_USER" >/dev/null 2>&1; then
+    if [ -z "${MASTER_EGRESS_IP:-}" ]; then
+        MASTER_EGRESS_IP=$(grep "^MASTER_EGRESS_IP=" "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f2)
+    fi
+    if [ -z "${SSH_PORT:-}" ]; then
+        SSH_PORT=$(grep "^SSH_PORT=" "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f2)
+        [ -z "$SSH_PORT" ] && SSH_PORT="22"
+    fi
+    if [ -n "$MASTER_EGRESS_IP" ] && [ "$MASTER_EGRESS_IP" != "127.0.0.1" ] && command -v sshd >/dev/null 2>&1; then
+        echo -e "\n\033[36m[隧道链路自检] 确保 Master ($MASTER_EGRESS_IP) 可经 SSH 端口 $SSH_PORT 公钥借道本机...\033[0m"
+
+        # ① 防火墙: 限源放行 SSH 端口 (ufw 同规格规则幂等, 不产生重复)
+        SSH_FW_APPLIED=""
+        if command -v ufw >/dev/null 2>&1 && ufw status | grep -qw active; then
+            ufw allow from "$MASTER_EGRESS_IP" to any port "$SSH_PORT" proto tcp >/dev/null 2>&1 && SSH_FW_APPLIED="ufw"
+        elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld | grep -qw active; then
+            firewall-cmd --quiet --permanent --add-rich-rule="rule family=ipv4 source address=\"$MASTER_EGRESS_IP\" port port=\"$SSH_PORT\" protocol=\"tcp\" accept" 2>/dev/null \
+                && firewall-cmd --quiet --reload >/dev/null 2>&1 && SSH_FW_APPLIED="firewalld"
+        elif command -v iptables >/dev/null 2>&1; then
+            if [[ "$MASTER_EGRESS_IP" == *":"* ]] && command -v ip6tables >/dev/null 2>&1; then
+                ip6tables -C INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT" -j ACCEPT >/dev/null 2>&1 \
+                    || { ip6tables -I INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT" -j ACCEPT 2>/dev/null && SSH_FW_APPLIED="ip6tables"; }
+            else
+                iptables -C INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT" -j ACCEPT >/dev/null 2>&1 \
+                    || { iptables -I INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT" -j ACCEPT 2>/dev/null && SSH_FW_APPLIED="iptables"; }
+            fi
+        fi
+        [ -n "$SSH_FW_APPLIED" ] && echo -e " ✅ \033[32m防火墙已放行 Master→SSH:$SSH_PORT ($SSH_FW_APPLIED, 限源)。\033[0m"
+
+        # ② sshd 公钥认证: 全局关闭时仅隧道用户开例外 (Match 块带标识注释, 卸载器按标记摘除)
+        TUNNEL_SSHD_CFG="/etc/ssh/sshd_config"
+        pubkey_eff() {
+            sshd -T -C "user=${TUNNEL_USER},host=localhost,addr=${MASTER_EGRESS_IP}" 2>/dev/null \
+                | awk '$1=="pubkeyauthentication"{print tolower($2)}'
+        }
+        if [ "$(pubkey_eff)" != "yes" ] && [ -f "$TUNNEL_SSHD_CFG" ]; then
+            if ! grep -q "^# \[IP-Sentinel\] tunnel-user pubkey exception" "$TUNNEL_SSHD_CFG"; then
+                printf "\n# [IP-Sentinel] tunnel-user pubkey exception (uninstall.sh strips this block)\nMatch User %s\n    PubkeyAuthentication yes\n" "$TUNNEL_USER" >> "$TUNNEL_SSHD_CFG"
+            fi
+            if sshd -t 2>/dev/null; then
+                systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1 || true
+            else
+                # 语法异常: 立即摘除刚追加的块, 保住宿主 sshd
+                MARK_LINE=$(grep -n "^# \[IP-Sentinel\] tunnel-user pubkey exception" "$TUNNEL_SSHD_CFG" | head -1 | cut -d: -f1)
+                [ -n "$MARK_LINE" ] && sed -i "${MARK_LINE},$((MARK_LINE + 2))d" "$TUNNEL_SSHD_CFG"
+                echo -e " ⚠️ \033[33msshd 配置语法异常, 已回滚未生效 (请人工检查 $TUNNEL_SSHD_CFG)。\033[0m"
+            fi
+        fi
+
+        # ③ 终局自检: 防火墙规则 + 隧道用户公钥认证双达标才报绿
+        FW_VERIFIED=""
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qE "^.{0,4}${SSH_PORT}/tcp +ALLOW.*${MASTER_EGRESS_IP}"; then
+            FW_VERIFIED="ufw"
+        elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld 2>/dev/null | grep -qw active \
+            && firewall-cmd --list-rich-rules 2>/dev/null | grep -q "port port=\"${SSH_PORT}\".*address=\"${MASTER_EGRESS_IP}\""; then
+            FW_VERIFIED="firewalld"
+        elif command -v iptables >/dev/null 2>&1; then
+            if [[ "$MASTER_EGRESS_IP" == *":"* ]]; then
+                ip6tables -C INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT" -j ACCEPT >/dev/null 2>&1 && FW_VERIFIED="ip6tables"
+            else
+                iptables -C INPUT -p tcp -s "$MASTER_EGRESS_IP" --dport "$SSH_PORT" -j ACCEPT >/dev/null 2>&1 && FW_VERIFIED="iptables"
+            fi
+        fi
+        PB_VERIFIED=$(pubkey_eff)
+        if [ -n "$FW_VERIFIED" ] && [ "$PB_VERIFIED" = "yes" ]; then
+            echo -e " ✅ \033[32m隧道链路就绪: Master → SSH:$SSH_PORT → 隧道公钥认证全通。\033[0m"
+        else
+            echo -e " ⚠️ \033[33m隧道链路风险: 防火墙=$([ -n "$FW_VERIFIED" ] && echo "${FW_VERIFIED}✅" || echo "未见本地规则") 公钥认证=$([ "$PB_VERIFIED" = "yes" ] && echo "✅" || echo "❌")\033[0m"
+            echo -e " \033[33m若云厂商安全组拦截 SSH $SSH_PORT, 请在控制台对 Master ($MASTER_EGRESS_IP) 放行, 否则养护隧道无法建立。\033[0m"
+        fi
+    fi
+fi
+
 echo "🗑️ 若未来需卸载，可重新运行本脚本选择[2]或执行: bash ${INSTALL_DIR}/core/uninstall.sh"
 echo "========================================================"
 
