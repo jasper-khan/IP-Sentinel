@@ -157,8 +157,6 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
     fakeNative(Date.prototype.toLocaleTimeString = function () {
       return new _RDTF(undefined, { timeZone: TZ, timeStyle: "medium" }).format(this);
     }, "toLocaleTimeString");
-
-    Object.defineProperty(window, "__MINITZ__", { value: TZ, configurable: true });
   } catch (e) { /* swallow */ }
 })();'''
 
