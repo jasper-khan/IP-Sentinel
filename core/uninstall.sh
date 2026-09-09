@@ -154,6 +154,13 @@ fi
 # ----------------------------------------------------------
 echo "[5/5] 正在抹除核心程序、配置文件与系统痕迹..."
 
+# [双栈出口保真配套] 摘除安装器落的 gai.conf v4 优先块 (按标识精确 2 行)
+if [ -f /etc/gai.conf ] && grep -q "^# \[IP-Sentinel\] v4-preferred resolution" /etc/gai.conf 2>/dev/null; then
+    GAI_LINE=$(grep -n "^# \[IP-Sentinel\] v4-preferred resolution" /etc/gai.conf | head -1 | cut -d: -f1)
+    [ -n "$GAI_LINE" ] && sed -i "${GAI_LINE},$((GAI_LINE + 1))d" /etc/gai.conf
+    echo -e " ✅ \033[32mgai.conf v4 优先已按标识摘除 (系统解析顺序恢复默认)。\033[0m"
+fi
+
 # [隧道链路自愈配套] 撤除安装器加的两类挂载点 (只清自己写的, 规格对称)
 #   1) sshd_config 的 Match 例外块: 按标识注释精确摘 3 行, 不碰 sshd 其他任何行
 #   2) Master 限源放行的 SSH 端口规则: 与安装器写入规格逐字对称

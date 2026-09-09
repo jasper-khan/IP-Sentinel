@@ -1360,6 +1360,28 @@ if id "$TUNNEL_USER" >/dev/null 2>&1; then
             fi
         fi
 
+# ----------------------------------------------------------
+# [双栈出口保真] v4 身份的养护流量跟随注册身份:
+#   Juggler 的 SOCKS5 把域名送远端 sshd 解析, glibc 默认 v6 优先 ->
+#   双栈机的 v6 出口画像可能与 v4 注册身份分裂 (实测 2607:9d00 段:
+#   v4=US / v6=HK, 养护会话恒落 google.com.hk)。gai.conf 翻转解析顺序
+#   为 v4 优先, AAAA-only 站仍可走 v6 (真实双栈用户行为)。
+#   新偏好仅对新进程生效: 首次落地后踢掉隧道会话, Master 60s 内重建
+#   隧道 (新 sshd 子进程读新偏好)。幂等: 已有标识则跳过。
+# ----------------------------------------------------------
+if [ -z "${NURTURE_IP:-}" ]; then
+    NURTURE_IP=$(grep "^PUBLIC_IP=" "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f2 | tr -d '[]')
+fi
+HAS_GLOBAL_V6=$(ip -6 addr show scope global 2>/dev/null | grep -c inet6 || true)
+if [ -n "$NURTURE_IP" ] && [[ "$NURTURE_IP" != *":"* ]] && [ "${HAS_GLOBAL_V6:-0}" -gt 0 ]; then
+    if ! grep -q "^# \[IP-Sentinel\] v4-preferred resolution" /etc/gai.conf 2>/dev/null; then
+        printf "\n# [IP-Sentinel] v4-preferred resolution (dual-stack split repair, uninstall.sh strips this)\nprecedence ::ffff:0:0/96 100\n" >> /etc/gai.conf
+        # 隧道会话的 sshd 子进程缓存了旧解析偏好, 踢掉令 Master 自动重连重建
+        pkill -u "$TUNNEL_USER" -f "sshd" >/dev/null 2>&1 || true
+        echo -e " ✅ \033[32m双栈出口保真: gai.conf 已落 v4 优先 (养护流量跟随 v4 注册身份), 隧道会话已重置待 Master 重连。\033[0m"
+    fi
+fi
+
         # ③ 终局自检: 防火墙规则 + 隧道用户公钥认证双达标才报绿
         FW_VERIFIED=""
         if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qE "^.{0,4}${SSH_PORT}/tcp +ALLOW.*${MASTER_EGRESS_IP}"; then
