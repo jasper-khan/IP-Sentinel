@@ -134,11 +134,13 @@ if [ -z "$LOG_CONTENT" ]; then
 🛠️ **建议**: 节点可能刚部署完毕，请在面板手动执行一次养护动作。
 EOT
 else
-    # 抓取末次执行模块的运行态势图
-    LAST_LOG_LINE=$(echo "$LOG_CONTENT" | grep "\[SCORE\]" | tail -n 1)
-    LAST_TIME=$(echo "$LAST_LOG_LINE" | awk '{print $1,$2}' | tr -d '[]')
-    LAST_MOD=$(echo "$LAST_LOG_LINE" | awk '{print $4}' | tr -d '[]')
-    LAST_SCORE=$(echo "$LAST_LOG_LINE" | awk -F'自检结论: ' '{print $2}')
+    # [fork 架构对齐] 养护已归 Master 引擎, 本地日志无 [SCORE] 数据 (上游残留死代码);
+    # agent 简报只报 agent 真实状态, 养护统计由 Master 每日简报承载 (不重复)
+    DAEMON_STATE=$(systemctl is-active ip-sentinel-agent-daemon 2>/dev/null)
+    [ "$DAEMON_STATE" = "active" ] && DAEMON_ICON="🟢" || DAEMON_ICON="🔴"
+    DAEMON_SINCE=$(systemctl show ip-sentinel-agent-daemon -p ActiveEnterTimestamp --value 2>/dev/null | awk '{print $1,$2,$3}')
+    LAST_MAINT=$(echo "$LOG_CONTENT" | grep "系统维护巡检结束" | tail -n 1 | awk '{print $1,$2}' | tr -d '[]')
+    [ -z "$LAST_MAINT" ] && LAST_MAINT="暂无记录"
 
     MSG="📊 **IP-Sentinel 每日简报 (${FLAG} ${REGION_NAME})**
 ----------------------------
@@ -148,12 +150,14 @@ else
 
     # [引擎代管] 本地 curl 养护已移除,养护统计由 Master 引擎日志承载
 
-    # 追加末次快照
+    # 追加 agent 引擎状态段
     MSG="$MSG
 
-🕒 **最近执行快照:  \`${LAST_MOD:-"System"} \`**
-时间: ${LAST_TIME:-"暂无数据"} (节点本地)
-结论: ${LAST_SCORE:-"暂无数据"}"
+🩺 **节点引擎状态**
+守护进程: ${DAEMON_ICON} ${DAEMON_STATE:-未知} (自 ${DAEMON_SINCE:-未知})
+指令端口: \`${AGENT_PORT:-未知}\`
+最近系统巡检: ${LAST_MAINT}
+🎯 养护执行与判定统计 → 参见中枢每日简报"
 
 fi
 
