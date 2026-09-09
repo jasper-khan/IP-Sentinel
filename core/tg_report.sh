@@ -156,8 +156,7 @@ else
 🩺 **节点引擎状态**
 守护进程: ${DAEMON_ICON} ${DAEMON_STATE:-未知} (自 ${DAEMON_SINCE:-未知})
 指令端口: \`${AGENT_PORT:-未知}\`
-最近系统巡检: ${LAST_MAINT}
-🎯 养护执行与判定统计 → 参见中枢每日简报"
+最近系统巡检: ${LAST_MAINT}"
 
 fi
 
