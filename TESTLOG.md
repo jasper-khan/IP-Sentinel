@@ -205,3 +205,11 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 
 ### 遗留观察 (未处理)
 - Master OTA 的 tag 锚定只覆盖最外层 `install_master.sh`; 它内部 `REPO_RAW_URL` 硬编码为 `main`，故 build_master.sh/模块/MANIFEST 实际都从 main 拉取。发布时 tag==main 故无实际影响，但"tag 锚定"名义上不完整
+
+### 锁定值的来源 (为什么是 0.5.6 / 152.0.4-beta.30)
+- **取值原则: 锁的不是"最新"或"更稳"的版本, 而是"当时生产正在跑、且已验证有效"的那一个** —— 锁定的目的是阻止将来自动跳版, 不是升级或降级。故 OTA/重装时 `pip install ==0.5.6` 全程幂等 (dry-run 实测: 依赖全部 already satisfied)
+- `camoufox==0.5.6` (pip 包): 2026-09-10 002 实测 `pip show camoufox` → Version 0.5.6 / `pip freeze` → camoufox==0.5.6。同时恰为 PyPI 当时最新版 (2026-09-06 发布; 上一版 0.5.5 为 08-18, 0.5.4 为 07-16), 即"当前最新"与"已验证"重合, 无需另行取舍
+- `152.0.4-beta.30` (浏览器本体): 由 `camoufox fetch` 拉取的定制 Firefox 构建, 取自 `/root/.cache/camoufox/config.json` 的 `active_version` —— 目录全名为 `152.0.4-beta.30-5720d45b` (带 commit 短哈希), 而 `pkgman.installed_verstr()` 返回不带哈希的 `152.0.4-beta.30`, 故锁定常量用后者以匹配校验语句。这就是 v5.6.2 笔记中反复提到的 "152 build"
+- 两轴关系: pip 包版本决定默认拉取哪个浏览器构建, 构建本身可单独指定; 正常情况锁 pip 包即锁定默认组合
+- 该组合"已知良好"的实测依据: `config['timezone']` 在主文档与 Worker 两 realm 均生效 (v5.6.21 三组对照 B 组证据), 六节点 tz 全部 by_coords 精确命中, 养护会话 rc=0
+- 日志措辞提醒: 装机输出 `✅ Camoufox 版本已锁定: pip 0.5.6 / 浏览器 152.0.4-beta.30` 中的 "pip" 指安装工具, 0.5.6 是 camoufox 包版本, 非 pip 自身版本
