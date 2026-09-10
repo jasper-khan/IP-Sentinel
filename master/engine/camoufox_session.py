@@ -195,40 +195,55 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
     Date.prototype.toString = stripConstruct(function () { return localString(this); }); mask(Date.prototype.toString, "toString", 0);
     Date.prototype.toTimeString = stripConstruct(function () { return timeString(this); }); mask(Date.prototype.toTimeString, "toTimeString", 0);
     Date.prototype.toDateString = stripConstruct(function () { return dateString(this); }); mask(Date.prototype.toDateString, "toDateString", 0);
-    // toLocaleString family: 透传调用方 locales/options, 按 ECMA-402 ToDateTimeOptions
-    // 分族注入默认: date 族 (weekday/year/month/day/era) 与 time 族
-    // (hour/minute/second/fractionalSecondDigits/dayPeriod) 各自独立判断 —
-    // 本族全空才注入本族默认, 跨族用户分量透传, 修饰符 (hour12/hourCycle/
-    // timeZoneName) 不算分量。无 timeZone 时强制 TZ (调用方优先)。
-    var _DATE_PROPS = ["weekday", "year", "month", "day", "era"];
-    var _TIME_PROPS = ["hour", "minute", "second", "fractionalSecondDigits", "dayPeriod"];
+    // toLocaleString family: 透传调用方 locales/options, 按 ECMA-402
+    // ToDateTimeOptions 单一 needDefaults 模型:
+    //   toLocaleString        required="any"  — 给了任一分量/style → 全不注入
+    //   toLocaleDateString    required="date" — date 族全空才注入 date 默认
+    //   toLocaleTimeString    required="time" — time 族全空才注入 time 默认
+    // date 族 = weekday/year/month/day (era/hour12/hourCycle/timeZoneName 不算);
+    // time 族 = dayPeriod/hour/minute/second/fractionalSecondDigits。
+    // dateStyle/timeStyle 参与"已给"判定且算本族 style; 族专用方法给对方族
+    // style 时抛 TypeError (与原生一致)。无 timeZone 时强制 TZ (调用方优先)。
+    var _DATE_PROPS = ["weekday", "year", "month", "day"];
+    var _TIME_PROPS = ["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"];
     function hasProp(o, props) {
       for (var i = 0; i < props.length; i++) {
         if (o[props[i]] !== undefined) return true;
       }
       return false;
     }
-    function toLocaleImpl(wantDate, wantTime) {
+    function toLocaleImpl(required) {
       return function () {
         var args = Array.prototype.slice.call(arguments);
         var o = (args.length < 2 || args[1] == null || typeof args[1] !== "object") ? {} : args[1];
         var opts = {};
         for (var k in o) opts[k] = o[k];
-        var needDate = wantDate && !hasProp(opts, _DATE_PROPS) && !opts.dateStyle;
-        var needTime = wantTime && !hasProp(opts, _TIME_PROPS) && !opts.timeStyle;
-        if (needDate) {
-          opts.year = "numeric"; opts.month = "numeric"; opts.day = "numeric";
+        var hasDate = hasProp(opts, _DATE_PROPS) || opts.dateStyle !== undefined;
+        var hasTime = hasProp(opts, _TIME_PROPS) || opts.timeStyle !== undefined;
+        if (required === "date" && opts.timeStyle !== undefined) {
+          throw new TypeError("timeStyle is not supported for toLocaleDateString");
         }
-        if (needTime) {
-          opts.hour = "numeric"; opts.minute = "numeric"; opts.second = "numeric";
+        if (required === "time" && opts.dateStyle !== undefined) {
+          throw new TypeError("dateStyle is not supported for toLocaleTimeString");
+        }
+        var need = required === "any" ? !(hasDate || hasTime)
+                 : required === "date" ? !hasDate
+                 : !hasTime;
+        if (need) {
+          if (required === "any" || required === "date") {
+            opts.year = "numeric"; opts.month = "numeric"; opts.day = "numeric";
+          }
+          if (required === "any" || required === "time") {
+            opts.hour = "numeric"; opts.minute = "numeric"; opts.second = "numeric";
+          }
         }
         if (!opts.timeZone) opts.timeZone = TZ;
         return new _RDTF(args[0], opts).format(this);
       };
     }
-    Date.prototype.toLocaleString = stripConstruct(toLocaleImpl(true, true)); mask(Date.prototype.toLocaleString, "toLocaleString", 0);
-    Date.prototype.toLocaleDateString = stripConstruct(toLocaleImpl(true, false)); mask(Date.prototype.toLocaleDateString, "toLocaleDateString", 0);
-    Date.prototype.toLocaleTimeString = stripConstruct(toLocaleImpl(false, true)); mask(Date.prototype.toLocaleTimeString, "toLocaleTimeString", 0);
+    Date.prototype.toLocaleString = stripConstruct(toLocaleImpl("any")); mask(Date.prototype.toLocaleString, "toLocaleString", 0);
+    Date.prototype.toLocaleDateString = stripConstruct(toLocaleImpl("date")); mask(Date.prototype.toLocaleDateString, "toLocaleDateString", 0);
+    Date.prototype.toLocaleTimeString = stripConstruct(toLocaleImpl("time")); mask(Date.prototype.toLocaleTimeString, "toLocaleTimeString", 0);
     } catch (e) { /* 读/格式化域失败 → 原生保留 */ }
 
     // ---- Date.prototype 本地分量 getter (GeoSpoof date-getters 移植, Firefox 走 formatToParts 路径) ----
