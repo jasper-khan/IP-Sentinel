@@ -165,3 +165,17 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 ## 附带发现
 - 002混用资源竞争: UAV下载流水线与浏览器会话撞车时2G内存swap抖动(60MB/s), 会话拖慢至20min; UAV删除后基线356M, 可用1623M
 - termark高频SSH连接风暴(已知): 低频轮询+单查模式规避
+
+## v5.6.21 INIT_TZ_JS 失效确认与删除 (2026-09-10, 002 生产实测)
+
+- **隔离三组对照** (独立临时 profile, 不走代理, 不写生产状态; page.html 页内嵌脚本读自身环境 = 无争议主世界, 注入脚本带 `window.__TZ_PATCH_MARKER__` 标记):
+  - A 生产配置 (config tz + 注入): marker ABSENT, Intl=America/Los_Angeles, gto=420
+  - B config tz 不注入: 逐项与 A 相同 → 注入加不加网页看到的一模一样
+  - C 只注入不设 config tz: Intl=America/Chicago (geoip 粗判) 而非目标 LA → 注入单独存在时不生效
+  - 三组 marker 全部 ABSENT → 脚本从未在页面执行 (Camoufox 隔离副本, upstream issue #48 同象)
+- **根因**: Camoufox stealth 设计 — Playwright 全部 JS (含 add_init_script) 跑在 Juggler 隔离副本, 真实页面不受影响; 进主世界需 main_world_eval=True + mw: 前缀, 引擎未开
+- **失效为何从未暴露**: add_init_script 调用永远成功返回 (except 永空) + 原生伪装输出与补丁目标一致 (同为 LA) → E2E 测"主线程时区 ✅"掩盖了注入失效
+- **v5.6.2 结论部分修正**: "152 build 主文档恒 UTC" 不再成立 — 当前 camoufox 0.5.6 上 config['timezone'] 主文档与 Worker 两 realm 均生效 (B 组证实); 0.5.6 装机未 pin 版本 (已知风险, 待办)
+- 删除后验证: py_compile 通过; INIT_TZ_JS/add_init_script/GeoSpoof/stripConstruct 全仓库零残留; 时区链 (resolve_timezone→config['timezone']→二进制层) 一行未动
+- 生产影响: 零 (改动仅在仓库, /opt 副本经 OTA 生效); 测试期间六节点 .last 计时器未变, engine.log 无幽灵会话, profiles 无残留
+- 遗留口子记录: document.lastModified / XSLT 时间偏移仍为服务器真值 (主世界执行代价评估后暂不修)

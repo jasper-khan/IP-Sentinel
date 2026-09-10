@@ -1,5 +1,15 @@
 # Changelog
 
+## [v5.6.21-fork] - 2026-09-10
+
+### 🗑️ Removal
+
+- **删除 INIT_TZ_JS 整段死代码 (486 行) + add_init_script 注入块** — 002 生产实测 (camoufox 0.5.6) 证实: Camoufox 把 Playwright 全部 JS 执行隔离在页面之外 (官方 stealth 设计, upstream issue #48), `add_init_script` 只在隔离副本执行, **网页从未见过这段补丁**。三组对照实测: config tz+注入 vs config tz 不注入, 网页读值逐项相同; 只注入不设 config tz, 网页读到 geoip 粗判值 (America/Chicago) 而非目标时区 — 注入对网页零贡献。时区伪装实际由 `config['timezone']` (城市坐标查表, v5.6.2) + Camoufox 二进制层原生承担, 主文档与 Worker 两 realm 均生效, 删除零行为变化
+  - 附带废弃 `except` 永空 (add_init_script 调用永远成功返回, 注入失效不可观测)
+  - v5.6.14~v5.6.20 十五个 commit 打磨的补丁从未在生产生效, E2E "主线程时区 ✅" 实为原生伪装的输出, 掩盖了注入失效
+  - 文件头/`load_persona` docstring 两处陈年注释同步更正 (时区=城市坐标查表手动注入; 经纬度/locale/WebRTC=geoip 跟随出口 IP)
+  - 已知遗留口子 (Camoufox 原生不管, JS 层本该管但进不去): `document.lastModified` 与 XSLT 时间偏移仍为服务器真值; 修它需 `main_world_eval=True` 走主世界, 可检测性上升, 评估后暂不处理
+
 ## [v5.6.6-fork] - 2026-09-08
 
 ### ✨ Features
