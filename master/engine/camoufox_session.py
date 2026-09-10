@@ -71,6 +71,20 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
   var _OD = Date;                                     // OriginalDate
   var _origGTZO = Date.prototype.getTimezoneOffset;   // 真实时区 (西为正)
   var _origFTS = Function.prototype.toString;
+  // 原生 prototype 方法快照 (补丁覆盖 Date.prototype 后, _OD.prototype 与其是
+  // 同一对象 — 回退写 _OD.prototype.getX 会自递归栈溢出; 且原生方法自带 brand
+  // check, 非法 receiver 抛正确 TypeError)。NaN 日期走原生回退自然得 NaN。
+  var _ODP = Date.prototype;
+  var _O = {
+    getHours: _ODP.getHours, getMinutes: _ODP.getMinutes, getSeconds: _ODP.getSeconds,
+    getDate: _ODP.getDate, getDay: _ODP.getDay, getMonth: _ODP.getMonth,
+    getFullYear: _ODP.getFullYear, getYear: _ODP.getYear,
+    getUTCMilliseconds: _ODP.getUTCMilliseconds,
+    setSeconds: _ODP.setSeconds, setMinutes: _ODP.setMinutes, setHours: _ODP.setHours,
+    setDate: _ODP.setDate, setMonth: _ODP.setMonth, setFullYear: _ODP.setFullYear,
+    setYear: _ODP.setYear,
+    setTime: _ODP.setTime
+  };
   var _g = typeof globalThis !== "undefined" ? globalThis : window;
 
   var _RDTF = Intl.DateTimeFormat;
@@ -155,7 +169,11 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
 
     // ---- Date.prototype.getTimezoneOffset: DST-correct ----
     try {
-    Date.prototype.getTimezoneOffset = stripConstruct(function () { return offsetOf(this); }); mask(Date.prototype.getTimezoneOffset, "getTimezoneOffset", 0);
+    // NaN 日期短路回原生 (得 NaN; 原生 brand check 保护非法 receiver)
+    Date.prototype.getTimezoneOffset = stripConstruct(function () {
+      if (isNaN(this.getTime())) return _origGTZO.call(this);
+      return offsetOf(this);
+    }); mask(Date.prototype.getTimezoneOffset, "getTimezoneOffset", 0);
 
     // ---- Date.prototype.toString / toTimeString / toDateString / toLocale* ----
     var DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
@@ -192,9 +210,18 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
       var wd = DAYS[new Date(Date.UTC(+m.year, m.month-1, +m.day)).getUTCDay()];
       return wd + " " + MONTHS[m.month-1] + " " + pad(+m.day) + " " + m.year;
     }
-    Date.prototype.toString = stripConstruct(function () { return localString(this); }); mask(Date.prototype.toString, "toString", 0);
-    Date.prototype.toTimeString = stripConstruct(function () { return timeString(this); }); mask(Date.prototype.toTimeString, "toTimeString", 0);
-    Date.prototype.toDateString = stripConstruct(function () { return dateString(this); }); mask(Date.prototype.toDateString, "toDateString", 0);
+    Date.prototype.toString = stripConstruct(function () {
+      if (isNaN(this.getTime())) return "Invalid Date";
+      return localString(this);
+    }); mask(Date.prototype.toString, "toString", 0);
+    Date.prototype.toTimeString = stripConstruct(function () {
+      if (isNaN(this.getTime())) return "Invalid Date";
+      return timeString(this);
+    }); mask(Date.prototype.toTimeString, "toTimeString", 0);
+    Date.prototype.toDateString = stripConstruct(function () {
+      if (isNaN(this.getTime())) return "Invalid Date";
+      return dateString(this);
+    }); mask(Date.prototype.toDateString, "toDateString", 0);
     // toLocaleString family: 透传调用方 locales/options, 按 ECMA-402
     // ToDateTimeOptions 单一 needDefaults 模型:
     //   toLocaleString        required="any"  — 给了任一分量/style → 全不注入
@@ -238,6 +265,8 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
           }
         }
         if (!opts.timeZone) opts.timeZone = TZ;
+        var t = this.getTime();
+        if (isNaN(t)) return "Invalid Date";
         return new _RDTF(args[0], opts).format(this);
       };
     }
@@ -252,28 +281,28 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
     // (构造器 epoch 校正后, 原生 getter 仍按真实时区读 → 会与 toString/gto 矛盾)。
     // getMilliseconds 与时区无关, 原生保留。
     Date.prototype.getHours = stripConstruct(function () {
-      try { return +partsOf(this).hour % 24; } catch (e) { return _OD.prototype.getHours.call(this); }
+      try { return +partsOf(this).hour % 24; } catch (e) { return _O.getHours.call(this); }
     }); mask(Date.prototype.getHours, "getHours", 0);
     Date.prototype.getMinutes = stripConstruct(function () {
-      try { return +partsOf(this).minute; } catch (e) { return _OD.prototype.getMinutes.call(this); }
+      try { return +partsOf(this).minute; } catch (e) { return _O.getMinutes.call(this); }
     }); mask(Date.prototype.getMinutes, "getMinutes", 0);
     Date.prototype.getSeconds = stripConstruct(function () {
-      try { return +partsOf(this).second; } catch (e) { return _OD.prototype.getSeconds.call(this); }
+      try { return +partsOf(this).second; } catch (e) { return _O.getSeconds.call(this); }
     }); mask(Date.prototype.getSeconds, "getSeconds", 0);
     Date.prototype.getDate = stripConstruct(function () {
-      try { return +partsOf(this).day; } catch (e) { return _OD.prototype.getDate.call(this); }
+      try { return +partsOf(this).day; } catch (e) { return _O.getDate.call(this); }
     }); mask(Date.prototype.getDate, "getDate", 0);
     Date.prototype.getDay = stripConstruct(function () {
       try {
         var m = partsOf(this);
         return new Date(Date.UTC(+m.year, m.month - 1, +m.day)).getUTCDay();
-      } catch (e) { return _OD.prototype.getDay.call(this); }
+      } catch (e) { return _O.getDay.call(this); }
     }); mask(Date.prototype.getDay, "getDay", 0);
     Date.prototype.getMonth = stripConstruct(function () {
-      try { return partsOf(this).month - 1; } catch (e) { return _OD.prototype.getMonth.call(this); }
+      try { return partsOf(this).month - 1; } catch (e) { return _O.getMonth.call(this); }
     }); mask(Date.prototype.getMonth, "getMonth", 0);
     Date.prototype.getFullYear = stripConstruct(function () {
-      try { return +partsOf(this).year; } catch (e) { return _OD.prototype.getFullYear.call(this); }
+      try { return +partsOf(this).year; } catch (e) { return _O.getFullYear.call(this); }
     }); mask(Date.prototype.getFullYear, "getFullYear", 0);
     } catch (e) { /* getter 域失败 → 原生保留 */ }
 
@@ -287,7 +316,7 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
       try { m = partsOf(d); } catch (e) { return NaN; }
       var cur = { year: +m.year, month: +m.month, day: +m.day,
                   hour: (+m.hour) % 24, minute: +m.minute, second: +m.second,
-                  ms: _OD.prototype.getUTCMilliseconds.call(d) };
+                  ms: _O.getUTCMilliseconds.call(d) };
       for (var k in changes) cur[k] = changes[k];
       // 归一化溢出: 先搭 1970 框架再 setUTCFullYear/setUTCMonth... (Date.UTC 对
       // 0-99 年自动 +1900 — setFullYear(50) 会变 1950; setUTC* 系列无此陷阱)
@@ -310,7 +339,7 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
         try {
           return setComponents(this, apply(arguments));
         } catch (e) {
-          return _OD.prototype[name].apply(this, arguments);
+          return _O[name].apply(this, arguments);
         }
       }); mask(Date.prototype[name], name, len);
     }
@@ -329,7 +358,7 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
     defSetter("setYear",         1, function (a) { return { year: a[0] < 100 ? a[0] + 1900 : a[0] }; });
     // getYear (废弃 API): 年份-1900 — 与 getFullYear 同路, 需与 getFullYear 自洽
     Date.prototype.getYear = stripConstruct(function () {
-      try { return +partsOf(this).year - 1900; } catch (e) { return _OD.prototype.getYear.call(this); }
+      try { return +partsOf(this).year - 1900; } catch (e) { return _O.getYear.call(this); }
     }); mask(Date.prototype.getYear, "getYear", 0);
     } catch (e) { /* setter 域失败 → 原生保留 */ }
 
