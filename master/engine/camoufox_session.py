@@ -54,18 +54,50 @@ def log(msg):
 
 
 INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_init_script.
-// TZ injected as script source placeholder __TZ__; offsets computed dynamically (DST-correct).
+// TZ 为脚本源码占位符 __TZ__ (运行前 .replace); 偏移全部动态计算 (DST 正确)。
+//
+// 覆盖 (主文档 realm; Worker 由 Camoufox config['timezone'] 原生覆盖):
+//   Intl.DateTimeFormat / Date.prototype 读与格式化 / Date 构造器 + Date.parse
+//   (歧义串与多参调用的 epoch 校正) / Temporal.Now 五方法 /
+//   Function.prototype.toString 注册表掩码 (引擎原生格式)。
+//
+// 构造器/parse/Temporal/掩码算法移植自 GeoSpoof (MIT, (c) 2026 Anthony Sgro):
+// https://github.com/anthonysgro/geospoof — 单 realm init-script 简化移植。
 (function () {
   var TZ = "__TZ__";
-  var NATIVE_TOSTRING = "function %s() { [native code] }";
-  function fakeNative(fn, name) {
-    try { fn.toString = function(){ return NATIVE_TOSTRING.replace("%s", name); }; } catch(e){}
-    return fn;
-  }
+  // 任何替换前捕获的原生引用
+  var _OD = Date;                                     // OriginalDate
+  var _origGTZO = Date.prototype.getTimezoneOffset;   // 真实时区 (西为正)
+  var _origFTS = Function.prototype.toString;
+  var _g = typeof globalThis !== "undefined" ? globalThis : window;
+
   try {
     var _RDTF = Intl.DateTimeFormat;
 
-    // Local-time parts of `d` expressed in TZ, and its offset in minutes (getTimezoneOffset convention).
+    // ---- Function.prototype.toString 注册表掩码 (GeoSpoof function-masking 移植) ----
+    // 单点覆盖 + 注册表: 被掩码函数 toString 返回引擎自身的原生格式 (从 Number
+    // 的真实输出派生, SpiderMonkey 多行 [native code] 形状得以复现)。取代旧的
+    // 逐函数挂 own toString 属性做法 (ownKeys 上可检测)。
+    var _reg = new Map();
+    var _np = _origFTS.call(Number).split("Number");
+    function mask(fn, name, len) {
+      try {
+        if (len !== undefined) Object.defineProperty(fn, "length", { value: len, configurable: true, enumerable: false, writable: false });
+        Object.defineProperty(fn, "name", { value: name, configurable: true, enumerable: false, writable: false });
+        _reg.set(fn, name);
+      } catch (e) {}
+      return fn;
+    }
+    var _fts = function toString() {
+      var n = _reg.get(this);
+      if (n !== undefined) return _np[0] + n + _np[1];
+      return _origFTS.call(this);
+    };
+    mask(_fts, "toString", 0);
+    Function.prototype.toString = _fts;
+
+    // ---- 伪装时区分量解析 (读层, 原有) ----
+    // `d` 在 TZ 下的本地分量, 及其偏移分钟数 (getTimezoneOffset 约定, 西为正)。
     var _dtfParts = new _RDTF("en-US", { timeZone: TZ, hour12: false,
       year: "numeric", month: "2-digit", day: "2-digit",
       hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -84,11 +116,11 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
     // ---- Intl.DateTimeFormat: force timeZone + patch resolvedOptions ----
     function patchRO(inst) {
       var ro = inst.resolvedOptions;
-      fakeNative(inst.resolvedOptions = function () {
+      mask(inst.resolvedOptions = function () {
         var r = ro.apply(this, arguments);
         r.timeZone = TZ;
         return r;
-      }, "resolvedOptions");
+      }, "resolvedOptions", 0);
       return inst;
     }
     function DTF() {
@@ -102,11 +134,11 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
     }
     DTF.prototype = _RDTF.prototype;
     DTF.supportedLocalesOf = _RDTF.supportedLocalesOf;
-    fakeNative(DTF, "DateTimeFormat");
+    mask(DTF, "DateTimeFormat", 0);
     Intl.DateTimeFormat = DTF;
 
     // ---- Date.prototype.getTimezoneOffset: DST-correct ----
-    fakeNative(Date.prototype.getTimezoneOffset = function () { return offsetOf(this); }, "getTimezoneOffset");
+    mask(Date.prototype.getTimezoneOffset = function () { return offsetOf(this); }, "getTimezoneOffset", 0);
 
     // ---- Date.prototype.toString / toTimeString / toDateString / toLocale* ----
     var DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
@@ -143,22 +175,248 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
       var wd = DAYS[new Date(Date.UTC(+m.year, m.month-1, +m.day)).getUTCDay()];
       return wd + " " + MONTHS[m.month-1] + " " + pad(+m.day) + " " + m.year;
     }
-    fakeNative(Date.prototype.toString = function () { return localString(this); }, "toString");
-    fakeNative(Date.prototype.toTimeString = function () { return timeString(this); }, "toTimeString");
-    fakeNative(Date.prototype.toDateString = function () { return dateString(this); }, "toDateString");
+    mask(Date.prototype.toString = function () { return localString(this); }, "toString", 0);
+    mask(Date.prototype.toTimeString = function () { return timeString(this); }, "toTimeString", 0);
+    mask(Date.prototype.toDateString = function () { return dateString(this); }, "toDateString", 0);
     // toLocaleString family: route through Intl with TZ (honors our DTF patch automatically via locale tags)
-    var _origTLS = Date.prototype.toLocaleString, _origTLDS = Date.prototype.toLocaleDateString, _origTLTS = Date.prototype.toLocaleTimeString;
-    fakeNative(Date.prototype.toLocaleString = function () {
+    mask(Date.prototype.toLocaleString = function () {
       return new _RDTF(undefined, { timeZone: TZ }).format(this);
-    }, "toLocaleString");
-    fakeNative(Date.prototype.toLocaleDateString = function () {
+    }, "toLocaleString", 0);
+    mask(Date.prototype.toLocaleDateString = function () {
       return new _RDTF(undefined, { timeZone: TZ, dateStyle: "short" }).format(this);
-    }, "toLocaleDateString");
-    fakeNative(Date.prototype.toLocaleTimeString = function () {
+    }, "toLocaleDateString", 0);
+    mask(Date.prototype.toLocaleTimeString = function () {
       return new _RDTF(undefined, { timeZone: TZ, timeStyle: "medium" }).format(this);
-    }, "toLocaleTimeString");
+    }, "toLocaleTimeString", 0);
+
+    // ---- Date.prototype 本地分量 getter (GeoSpoof date-getters 移植, Firefox 走 formatToParts 路径) ----
+    // getHours/getMinutes/getSeconds/getDate/getDay/getMonth/getFullYear 按 TZ 分量读
+    // (构造器 epoch 校正后, 原生 getter 仍按真实时区读 → 会与 toString/gto 矛盾)。
+    // getMilliseconds 与时区无关, 原生保留。
+    mask(Date.prototype.getHours = function () {
+      try { return +partsOf(this).hour % 24; } catch (e) { return _OD.prototype.getHours.call(this); }
+    }, "getHours", 0);
+    mask(Date.prototype.getMinutes = function () {
+      try { return +partsOf(this).minute; } catch (e) { return _OD.prototype.getMinutes.call(this); }
+    }, "getMinutes", 0);
+    mask(Date.prototype.getSeconds = function () {
+      try { return +partsOf(this).second; } catch (e) { return _OD.prototype.getSeconds.call(this); }
+    }, "getSeconds", 0);
+    mask(Date.prototype.getDate = function () {
+      try { return +partsOf(this).day; } catch (e) { return _OD.prototype.getDate.call(this); }
+    }, "getDate", 0);
+    mask(Date.prototype.getDay = function () {
+      try {
+        var m = partsOf(this);
+        return new Date(Date.UTC(+m.year, m.month - 1, +m.day)).getUTCDay();
+      } catch (e) { return _OD.prototype.getDay.call(this); }
+    }, "getDay", 0);
+    mask(Date.prototype.getMonth = function () {
+      try { return partsOf(this).month - 1; } catch (e) { return _OD.prototype.getMonth.call(this); }
+    }, "getMonth", 0);
+    mask(Date.prototype.getFullYear = function () {
+      try { return +partsOf(this).year; } catch (e) { return _OD.prototype.getFullYear.call(this); }
+    }, "getFullYear", 0);
+
+    // ---- Date.prototype 本地分量 setter (GeoSpoof date-setters 移植, 紧凑通用实现) ----
+    // 语义: 按 TZ 墙钟分量设值。取当前 TZ 分量 → 应用变更 (Date.UTC 归一化溢出,
+    // setHours(30)/setMonth(12) 滚动正确) → 反解 epoch (双探针 DST)。setTime/setUTC* 为
+    // UTC 语义, 原生保留。
+    function setComponents(d, changes) {
+      var m;
+      try { m = partsOf(d); } catch (e) { return NaN; }
+      var cur = { year: +m.year, month: +m.month, day: +m.day,
+                  hour: (+m.hour) % 24, minute: +m.minute, second: +m.second,
+                  ms: _OD.prototype.getUTCMilliseconds.call(d) };
+      for (var k in changes) cur[k] = changes[k];
+      var asUTC = _OD.UTC(cur.year, cur.month - 1, cur.day, cur.hour, cur.minute, cur.second, cur.ms);
+      if (isNaN(asUTC)) { d.setTime(NaN); return NaN; }
+      // asUTC 即"墙上时钟当作 UTC"的 epoch; 反求真实 epoch = asUTC - TZ偏移(该时刻)
+      var east = eastOffsetOf(new _OD(asUTC), TZ, 0);
+      var e = asUTC - east * 60000;
+      var east2 = eastOffsetOf(new _OD(e), TZ, east);
+      if (east2 !== east) e = asUTC - east2 * 60000;
+      d.setTime(e);
+      return d.getTime();
+    }
+    function defSetter(name, len, apply) {
+      mask(Date.prototype[name] = function () {
+        try {
+          return setComponents(this, apply(arguments));
+        } catch (e) {
+          return _OD.prototype[name].apply(this, arguments);
+        }
+      }, name, len);
+    }
+    defSetter("setMilliseconds", 1, function (a) { return { ms: a[0] }; });
+    defSetter("setSeconds",      2, function (a) {
+      var c = { second: a[0] }; if (a.length > 1) c.ms = a[1]; return c; });
+    defSetter("setMinutes",      3, function (a) {
+      var c = { minute: a[0] }; if (a.length > 1) c.second = a[1]; if (a.length > 2) c.ms = a[2]; return c; });
+    defSetter("setHours",        4, function (a) {
+      var c = { hour: a[0] }; if (a.length > 1) c.minute = a[1]; if (a.length > 2) c.second = a[2]; if (a.length > 3) c.ms = a[3]; return c; });
+    defSetter("setDate",         1, function (a) { return { day: a[0] }; });
+    defSetter("setMonth",        2, function (a) {
+      var c = { month: a[0] + 1 }; if (a.length > 1) c.day = a[1]; return c; });
+    defSetter("setFullYear",     3, function (a) {
+      var c = { year: a[0] }; if (a.length > 1) c.month = a[1] + 1; if (a.length > 2) c.day = a[2]; return c; });
+    // setYear (废弃 API): 年份 <100 加 1900
+    defSetter("setYear",         1, function (a) { return { year: a[0] < 100 ? a[0] + 1900 : a[0] }; });
+
+    // ---- timezone-helpers (GeoSpoof 移植) ----
+    // 真实系统 IANA id (原生 Intl 解析; 002 为 UTC, 但代码不依赖该假设)
+    var _realTzId = "UTC";
+    try { _realTzId = new _RDTF().resolvedOptions().timeZone || "UTC"; } catch (e) {}
+
+    // "GMT+8" / "GMT-5:30" → 东为正的分钟数
+    function parseGMTOffset(s) {
+      if (s === "GMT" || s === "UTC") return 0;
+      var m = /^GMT([+-])(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?$/.exec(s);
+      if (!m) return 0;
+      var sign = m[1] === "+" ? 1 : -1;
+      return sign * (parseInt(m[2], 10) * 60 + parseInt(m[3] || "0", 10) + parseInt(m[4] || "0", 10) / 60);
+    }
+    // d 时刻 tzId 的 UTC 偏移 (东为正, 分钟), 经原生 shortOffset 分量 (formatter 缓存)
+    var _offFmts = {};
+    function eastOffsetOf(d, tzId, fallback) {
+      try {
+        var f = _offFmts[tzId];
+        if (!f) f = _offFmts[tzId] = new _RDTF("en-US", { timeZone: tzId, timeZoneName: "shortOffset" });
+        var parts = f.formatToParts(d), v = "GMT";
+        for (var i = 0; i < parts.length; i++) if (parts[i].type === "timeZoneName") v = parts[i].value;
+        return parseGMTOffset(v);
+      } catch (e) { return fallback; }
+    }
+    // 字符串无显式时区标记 → 引擎按真实本地时区解析 (需校正);
+    // 纯日期 YYYY-MM-DD 规范即 UTC (不校正)
+    function isAmbiguousDateString(str) {
+      var s = String(str).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+      if (/Z$/i.test(s)) return false;
+      if (/\b(?:UTC|GMT)\b/i.test(s)) return false;
+      if (/[+-]\d{2}(?::?\d{2})?$/.test(s)) return false;
+      return true;
+    }
+    // epoch 校正量 (ms): 使真实 TZ 浏览器把同一墙上时钟解析到同一 epoch。
+    // 真实侧经 Intl 解析 (与伪装侧同精度); 两轮探针处理 DST 边界穿越。
+    function computeEpochAdjustment(parsedDate, fallbackEast) {
+      var realEastFallback = -_origGTZO.call(parsedDate);
+      var realWest = -eastOffsetOf(parsedDate, _realTzId, realEastFallback);
+      var utcEpoch = parsedDate.getTime() + realWest * 60000;
+      try {
+        var spoofEast = eastOffsetOf(new _OD(utcEpoch - fallbackEast * 60000), TZ, fallbackEast);
+        if (spoofEast !== fallbackEast) {
+          spoofEast = eastOffsetOf(new _OD(utcEpoch - spoofEast * 60000), TZ, fallbackEast);
+        }
+        return Math.round((-spoofEast - realWest) * 60000);
+      } catch (e) {
+        return Math.round((-fallbackEast - realWest) * 60000);
+      }
+    }
+
+    // ---- Date 构造器 + Date.parse (GeoSpoof date-constructor 移植) ----
+    // 歧义串/多参调用按伪装时区重定 epoch; 显式时区/纯日期/数值原样透传。
+    function DateOverride() {
+      var nt = new.target;
+      var args = Array.prototype.slice.call(arguments);
+      var construct = function (ctorArgs) {
+        return Reflect.construct(_OD, ctorArgs, nt);
+      };
+      // 不带 new: 原生 Date() 返回当前时间字符串; 走实例同一条 (被补丁的)
+      // toString 路径, 保证 new Date() == Date() 两侧一致
+      if (!nt) {
+        return new _OD().toString();
+      }
+      if (args.length === 0) return construct([]);
+      if (args.length === 1) {
+        var a = args[0];
+        if (typeof a === "number") return construct([a]);
+        if (typeof a === "string") {
+          try {
+            var parsed = new _OD(a);
+            if (isNaN(parsed.getTime())) return construct([a]);
+            if (isAmbiguousDateString(a)) {
+              return construct([parsed.getTime() + computeEpochAdjustment(parsed, -offsetOf(parsed))]);
+            }
+            return construct([a]);
+          } catch (e) { return construct([a]); }
+        }
+        return construct([a]);
+      }
+      // 多参: 年, 月, [日, 时, 分, 秒, 毫秒] — 原生按真实本地时区解析, 需校正
+      var multi = [args[0], args[1], args[2] === undefined ? 1 : args[2],
+                   args[3] === undefined ? 0 : args[3], args[4] === undefined ? 0 : args[4],
+                   args[5] === undefined ? 0 : args[5], args[6] === undefined ? 0 : args[6]];
+      try {
+        var pm = Reflect.construct(_OD, multi);
+        return construct([pm.getTime() + computeEpochAdjustment(pm, -offsetOf(pm))]);
+      } catch (e) { return construct(multi); }
+    }
+
+    DateOverride.prototype = _OD.prototype;
+    Object.defineProperty(DateOverride, "name", { value: "Date", configurable: true, enumerable: false, writable: false });
+    Object.defineProperty(DateOverride, "length", { value: 7, configurable: true, enumerable: false, writable: false });
+    // 拷贝全部静态属性 (now/UTC 等; 跳过 prototype/name/length/parse)
+    var _skip = { prototype: 1, name: 1, length: 1, parse: 1 };
+    var _ownNames = Object.getOwnPropertyNames(_OD);
+    for (var oi = 0; oi < _ownNames.length; oi++) {
+      var op = _ownNames[oi];
+      if (_skip[op]) continue;
+      var od = Object.getOwnPropertyDescriptor(_OD, op);
+      if (od) Object.defineProperty(DateOverride, op, od);
+    }
+    // Date.parse: 与构造器同源的歧义校正
+    function dateParseOverride(str) {
+      try {
+        var epoch = _OD.parse(str);
+        if (isNaN(epoch)) return NaN;
+        if (isAmbiguousDateString(str)) {
+          var pp = new _OD(epoch);
+          return epoch + computeEpochAdjustment(pp, -offsetOf(pp));
+        }
+        return epoch;
+      } catch (e) { return _OD.parse(str); }
+    }
+    mask(dateParseOverride, "parse", 1);
+    Object.defineProperty(DateOverride, "parse", { value: dateParseOverride, configurable: true, enumerable: false, writable: true });
+    // 原型链/构造器引用/全局替换
+    Object.setPrototypeOf(DateOverride, Function.prototype);
+    _reg.set(DateOverride, "Date");
+    _g.Date = DateOverride;
+    Object.defineProperty(_OD.prototype, "constructor", { value: DateOverride, configurable: true, enumerable: false, writable: true });
+
+    // ---- Temporal.Now 五方法 (GeoSpoof temporal 移植) ----
+    // 默认时区替换为 TZ; 显式传参时原样透传
+    try {
+      if (typeof Temporal !== "undefined" && Temporal && Temporal.Now) {
+        var _Now = Temporal.Now;
+        var _oPDT = _Now.plainDateTimeISO.bind(_Now);
+        var _oPD = _Now.plainDateISO.bind(_Now);
+        var _oPT = _Now.plainTimeISO.bind(_Now);
+        var _oZDT = _Now.zonedDateTimeISO.bind(_Now);
+        var _defs = [
+          ["timeZoneId",       function () { return TZ; }],
+          ["plainDateTimeISO", function (tzLike) { return tzLike === undefined ? _oPDT(TZ) : _oPDT(tzLike); }],
+          ["plainDateISO",     function (tzLike) { return tzLike === undefined ? _oPD(TZ) : _oPD(tzLike); }],
+          ["plainTimeISO",     function (tzLike) { return tzLike === undefined ? _oPT(TZ) : _oPT(tzLike); }],
+          ["zonedDateTimeISO", function (tzLike) { return tzLike === undefined ? _oZDT(TZ) : _oZDT(tzLike); }]
+        ];
+        for (var di = 0; di < _defs.length; di++) {
+          var dprop = _defs[di][0], dfn = _defs[di][1];
+          mask(dfn, dprop, 0);
+          var dd = Object.getOwnPropertyDescriptor(_Now, dprop) || {};
+          Object.defineProperty(_Now, dprop, {
+            value: dfn,
+            configurable: dd.configurable !== false,
+            enumerable: !!dd.enumerable,
+            writable: dd.writable !== false
+          });
+        }
+      }
+    } catch (e) { /* Temporal 覆盖失败 → 原生保留 */ }
   } catch (e) { /* swallow */ }
-})();'''
+})();
+'''
 
 
 def resolve_timezone(region_code, lat, lon):
