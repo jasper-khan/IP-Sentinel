@@ -1,5 +1,18 @@
 # Changelog
 
+## [v5.6.22-fork] - 2026-09-10
+
+### 🔒 Hardening
+
+- **Camoufox 版本双锁 (pip 包 + 浏览器构建)** — 时区伪装由 Camoufox 二进制层实现 (非 JS 注入), 上游行为变更会静默改变养护效果 (v5.6.2 观测的 "主文档恒 UTC" 在当前构建上已不成立), 而 `pip install "camoufox[geoip]"` 原先不锁版本, 任何重装都会拉到当时最新版。现锁定 `camoufox==0.5.6` + 构建号 `152.0.4-beta.30` (2026-09-10 002 生产实测已知良好组合), 装机后校验构建号, 不符则告警并提示跑一轮养护自检
+- **`data/timezones.json` 纳入 MANIFEST 并加下载门禁** — 该文件原先不入清单, 且用 `curl --retry 3 || true` 拉取: (a) `--retry` 不重试 404 而 raw.githubusercontent 的间歇 404 是瞬时故障; (b) `-o 目标文件` 就地覆盖, 一次 404 会把已装好的表**截断清空**, 引擎随即静默回落 geoip 粗判 —— 正是 v5.6.2 修的那个 bug 换了个触发途径。改为: 下载至临时文件 → 对 MANIFEST 校验 → 通过才原子 `mv`, **重试的退出条件是"哈希对上了"而非"拿到了文件"** (5 次, 对齐 `install_master.sh` 的 fetch_retry 惯用法); 5 次仍不通过则告警且**绝不覆写旧文件** (陈旧的好表胜过没有表)
+- `scripts/gen_manifest.sh` PATHS 增补 `data/timezones.json`
+
+### 🐛 Fixes
+
+- **修复浏览器本体"已存在即跳过"判断恒为真** — 原判断是 `if ! ls "${MASTER_DIR}/.camoufox"`, 但 `CAMOUFOX_HOME` 环境变量在 camoufox 0.5.x 已被上游彻底移除 (全包零命中), 数据目录固定为 `platformdirs.user_cache_dir("camoufox")` (Linux: `~/.cache/camoufox`), 该目录永不创建 → 判断恒真, 每次装机都重走一遍拉取。改用 `pkgman.installed_verstr()` 探测 (缺库抛异常 → 空输出)
+- 清除 3 处失效的 `CAMOUFOX_HOME=` 前缀 (GeoIP 校验/补拉两段), 它们不生效却误导读者以为路径受控
+
 ## [v5.6.21-fork] - 2026-09-10
 
 ### 🗑️ Removal

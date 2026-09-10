@@ -8,7 +8,17 @@
 #   - 隧道密钥 ed25519 私钥永不离开 Master,公钥打印给用户
 #     在 Agent 安装时粘贴
 #   - OTA 升级复用本模块: 已有密钥/venv 不动,只更新引擎文件
+#   - 版本双锁: pip 包 + 浏览器构建。时区伪装由 Camoufox 二进制层
+#     实现(非 JS 注入),上游行为变更会静默改变养护效果,故装机后校验
+#     构建号,不符则告警。
+#     已知良好组合 (2026-09-10 002 生产实测):
+#       camoufox==0.5.6  +  浏览器 152.0.4-beta.30
+#     注: CAMOUFOX_HOME 环境变量在 0.5.x 已移除,数据目录固定为
+#     platformdirs.user_cache_dir("camoufox") (Linux: ~/.cache/camoufox)
 # ==========================================================
+
+CAMOUFOX_PIN="0.5.6"
+CAMOUFOX_BROWSER_EXPECTED="152.0.4-beta.30"
 
 do_engine_setup() {
     echo -e "\n[5/5] 正在部署浏览器养护引擎 (Camoufox) ..."
@@ -33,7 +43,7 @@ do_engine_setup() {
 
     echo "📦 正在安装/校验 Camoufox (首次较慢)..."
     "${MASTER_DIR}/venv/bin/pip" install --quiet --disable-pip-version-check \
-        "camoufox[geoip]" >/dev/null 2>&1 || {
+        "camoufox[geoip]==${CAMOUFOX_PIN}" >/dev/null 2>&1 || {
         echo -e "\033[33m⚠️ camoufox pip 安装失败，引擎未部署 (网络?)。可稍后重跑安装修复。\033[0m"
         return 0
     }
@@ -45,24 +55,39 @@ do_engine_setup() {
 
     # 浏览器本体 (缺失时拉取;已存在跳过)
     # 注: camoufox fetch 在装了 geoip extra 时会顺带下载 GeoIP 数据库 (mmdb)
-    if ! ls "${MASTER_DIR}/.camoufox" >/dev/null 2>&1; then
+    #     探测用 installed_verstr() 而非目录存在性 (CAMOUFOX_HOME 已废弃, 见头注)
+    BROWSER_VER=$("${MASTER_DIR}/venv/bin/python3" -c \
+        "from camoufox.pkgman import installed_verstr; print(installed_verstr())" 2>/dev/null || true)
+    if [ -z "$BROWSER_VER" ]; then
         echo "🦊 正在拉取 Camoufox 浏览器本体 (~150MB, 首次较慢)..."
-        CAMOUFOX_HOME="${MASTER_DIR}/.camoufox" "${MASTER_DIR}/venv/bin/python3" -m \
+        "${MASTER_DIR}/venv/bin/python3" -m \
             camoufox fetch >/dev/null 2>&1 || {
             echo -e "\033[33m⚠️ 浏览器本体拉取失败，可稍后手动执行: ${MASTER_DIR}/venv/bin/python3 -m camoufox fetch\033[0m"
         }
+        BROWSER_VER=$("${MASTER_DIR}/venv/bin/python3" -c \
+            "from camoufox.pkgman import installed_verstr; print(installed_verstr())" 2>/dev/null || true)
+    fi
+
+    # [版本锁定] 构建号须等于已知良好版本; 不符告警不阻断 (会话多半仍可跑)
+    if [ -z "$BROWSER_VER" ]; then
+        echo -e "\033[31m❌ 浏览器本体不可用 (installed_verstr 无输出)，引擎无法养护。\033[0m"
+    elif [ "$BROWSER_VER" != "${CAMOUFOX_BROWSER_EXPECTED}" ]; then
+        echo -e "\033[33m⚠️ 浏览器构建与锁定版本不符: 实际 ${BROWSER_VER}, 锁定 ${CAMOUFOX_BROWSER_EXPECTED}\033[0m"
+        echo -e "\033[33m   时区伪装由二进制层实现, 构建变更可能改变养护效果, 请跑一轮养护自检确认后再放行。\033[0m"
+    else
+        echo "✅ Camoufox 版本已锁定: pip ${CAMOUFOX_PIN} / 浏览器 ${BROWSER_VER}"
     fi
 
     # ---------- 1.5 GeoIP 数据库 (geoip=True 运行时必需) ----------
     # 地理跟随出口 IP 需要 MaxMind mmdb。camoufox fetch 已尝试下载,此处显式
     # 校验:不可用则单独补拉。缺库会导致会话 UnknownIPLocation 崩溃,必须堵死。
-    if ! CAMOUFOX_HOME="${MASTER_DIR}/.camoufox" "${MASTER_DIR}/venv/bin/python3" -c \
+    if ! "${MASTER_DIR}/venv/bin/python3" -c \
         "from camoufox.geolocation import geoip_allowed, get_mmdb_path; geoip_allowed(); import os; assert os.path.exists(get_mmdb_path('ipv4'))" >/dev/null 2>&1; then
         echo "🌍 正在补拉 GeoIP 数据库 (地理跟随出口 IP 所需)..."
-        CAMOUFOX_HOME="${MASTER_DIR}/.camoufox" "${MASTER_DIR}/venv/bin/python3" -c \
+        "${MASTER_DIR}/venv/bin/python3" -c \
             "from camoufox.geolocation import download_mmdb; download_mmdb()" >/dev/null 2>&1 || {
             echo -e "\033[33m⚠️ GeoIP 数据库拉取失败。地理跟随将不可用 (会话仍可跑但无 geoip 地理)。\033[0m"
-            echo -e "\033[33m   可稍后手动执行: CAMOUFOX_HOME=${MASTER_DIR}/.camoufox ${MASTER_DIR}/venv/bin/python3 -c 'from camoufox.geolocation import download_mmdb; download_mmdb()'\033[0m"
+            echo -e "\033[33m   可稍后手动执行: ${MASTER_DIR}/venv/bin/python3 -c 'from camoufox.geolocation import download_mmdb; download_mmdb()'\033[0m"
         }
     fi
 
@@ -87,8 +112,42 @@ do_engine_setup() {
     # ---------- 4. 引擎数据 ----------
     # 时区表 (persona 用); 区域模板/关键词/坐标由注册报文携带 + 调度器按需拉取,
     # 不在装机时点拉取 (Master 先装、节点后注册,装机时 DB 为空)
-    curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/timezones.json?t=$(date +%s)" \
-        -o "${MASTER_DIR}/data/timezones.json" 2>/dev/null || true
+    #
+    # [完整性门禁] 下载 → 对 MANIFEST 校验 → 原子落位。三点:
+    #   1. shell 级循环重试, 退出条件是"哈希对上了"而非"拿到了文件" — curl 的
+    #      --retry 不重试 404, 而 raw.githubusercontent 的间歇 404 是瞬时故障
+    #      (见 install_master.sh fetch_retry 注释: 实测 5 次内必过)
+    #   2. 先落临时文件、校验通过才 mv: 直接 -o 目标文件时, 一次 404 会把已装好的
+    #      表截断清空 (curl -f 失败仍会创建输出文件), 引擎随后静默回落 geoip 粗判
+    #      (正是 v5.6.2 修的那个 bug, 只是换了触发途径)。原子替换杜绝之。
+    #   3. 时区表缺位只降精度不致命 (回退 geoip 粗判), 故失败告警不熔断 —
+    #      但绝不覆写旧文件, 陈旧的好表胜过没有表
+    TZ_TMP=$(mktemp "${MASTER_DIR}/data/.timezones.XXXXXX")
+    TZ_EXPECTED=$(awk '$2 == "data/timezones.json" {print $1}' "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null)
+    TZ_OK=""
+    for _i in 1 2 3 4 5; do
+        if curl -fsSL --connect-timeout 10 "${REPO_RAW_URL}/data/timezones.json?t=$(date +%s)" -o "$TZ_TMP" 2>/dev/null; then
+            if [ -z "$TZ_EXPECTED" ]; then
+                TZ_OK="1"; break          # 清单无此条目 (版本错配) → 无从校验, 按全项目惯例放行
+            elif [ "$(sha256sum "$TZ_TMP" | awk '{print $1}')" = "$TZ_EXPECTED" ]; then
+                TZ_OK="1"; break          # 哈希一致 = 重试的唯一退出条件
+            fi
+        fi
+        sleep 2
+    done
+    if [ -n "$TZ_OK" ]; then
+        mv -f "$TZ_TMP" "${MASTER_DIR}/data/timezones.json"
+        if [ -n "$TZ_EXPECTED" ]; then
+            echo "✅ 时区表已校验落位 (哈希与 MANIFEST 一致)"
+        else
+            echo "✅ 时区表已落位 (清单无条目, 未校验)"
+        fi
+    else
+        rm -f "$TZ_TMP"
+        echo -e "\033[33m⚠️ 时区表拉取/校验失败 (5 次重试后仍不通过), 未覆写已有文件。\033[0m"
+        echo -e "\033[33m   后果: 会话时区回落 geoip 粗判 (实测 LA 出口会判成 Chicago, 差 2h)。\033[0m"
+        echo -e "\033[33m   修复: 重跑本安装, 或手动拉取 data/timezones.json 至 ${MASTER_DIR}/data/\033[0m"
+    fi
 
     # ---------- 5. systemd 守护 ----------
     if is_systemd; then

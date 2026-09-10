@@ -179,3 +179,29 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 - 删除后验证: py_compile 通过; INIT_TZ_JS/add_init_script/GeoSpoof/stripConstruct 全仓库零残留; 时区链 (resolve_timezone→config['timezone']→二进制层) 一行未动
 - 生产影响: 零 (改动仅在仓库, /opt 副本经 OTA 生效); 测试期间六节点 .last 计时器未变, engine.log 无幽灵会话, profiles 无残留
 - 遗留口子记录: document.lastModified / XSLT 时间偏移仍为服务器真值 (主世界执行代价评估后暂不修)
+
+## v5.6.22 Camoufox 版本双锁 + timezones.json 下载门禁 (2026-09-10, 002 生产实测)
+
+### 版本锁定
+- 记录已知良好组合: pip camoufox==0.5.6 + 浏览器 152.0.4-beta.30 (PyPI 当前最新即 0.5.6)
+- 生产实测探测语句: `installed_verstr()` → [152.0.4-beta.30]，与锁定值一致 → 走绿字确认分支
+- `pip install --dry-run camoufox[geoip]==0.5.6` → 依赖全部 already satisfied (pin 有效且幂等)
+- 关键前提: do_engine_setup 每次 Master OTA 都会执行 (TG 点 OTA → install_master.sh → build_master.sh → do_engine_setup)，非仅全新装机
+
+### 发现并修复的既有缺陷
+- **CAMOUFOX_HOME 在 camoufox 0.5.x 已被移除** (全包 grep 零命中)，数据目录硬编码为 user_cache_dir("camoufox") → `~/.cache/camoufox`
+- 连带: `if ! ls "${MASTER_DIR}/.camoufox"` 判断恒为真，浏览器已装也会重走拉取
+- 连带: GeoIP 校验/补拉两段的 CAMOUFOX_HOME 前缀均失效 (不生效但因路径恰为默认值而"碰巧能用")
+
+### timezones.json 下载门禁 (沙箱四用例，抽出待发布代码段实跑)
+| 用例 | 场景 | 结果 |
+|------|------|------|
+| 1 | 清单哈希正确 | ✅ 0.4s 校验通过并原子落位，旧表被替换 |
+| 2 | 清单哈希错误 | ✅ 11.2s (5次重试+退避) 后告警，**旧表未被覆写**，无临时文件残留 |
+| 3 | 清单无此条目 | ✅ 放行并注明"未校验" |
+| 4 | 全新装机+哈希错误 | ✅ 告警，目标目录干净无残渣 |
+
+- 修复的两个真实缺陷: (a) `curl --retry 3` 不重试 404 (curl 视 404 为永久错误)，而 raw.githubusercontent 间歇 404 是瞬时故障 — 项目内 `install_master.sh` 的 fetch_retry 注释已记载该现象; (b) `-o 目标文件` 就地覆盖，一次 404 即截断已装好的表 → 引擎静默回落 geoip 粗判 (v5.6.2 修的那个 bug 的另一种触发途径)
+
+### 遗留观察 (未处理)
+- Master OTA 的 tag 锚定只覆盖最外层 `install_master.sh`; 它内部 `REPO_RAW_URL` 硬编码为 `main`，故 build_master.sh/模块/MANIFEST 实际都从 main 拉取。发布时 tag==main 故无实际影响，但"tag 锚定"名义上不完整

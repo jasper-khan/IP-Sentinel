@@ -34,6 +34,7 @@ PATHS=(
     "master/engine/scheduler.sh"
     "master/engine/tg_digest.sh"
     "data/probe/ip.sh"
+    "data/timezones.json"
     "version.txt"
 )
 
