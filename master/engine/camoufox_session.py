@@ -15,7 +15,8 @@ IP-Sentinel 浏览器养护引擎 (Camoufox 会话)
   真实停留/滚动;不注入 gl/hl URL 参数 (curl 时代痕迹)
 - UA/指纹完全交给 Camoufox 自洽管理,不外部注入
 - 区域自检用"干净观测者"探针: 会话主体浏览器结束后单独开一个非持久、
-  无 profile/cookie/指纹注入的全新 Camoufox 实例, 走同一隧道裸问三核。
+  无 profile/cookie/指纹注入的全新 Camoufox 实例, 走同一隧道裸问三核,
+  并强制 IPv4 出口 (IPv6 段常被 Google 误判, 见 v5.6.25)。
   绝不复用养护浏览器 —— 其累积 cookie 会让 Google 凭偏好作答而非凭 IP
   (对齐上游 PR #82 剥离探测身份原则的浏览器版)
 
@@ -438,6 +439,10 @@ def run_session(node, region_code, socks_port, persona, keywords, focus="all"):
             proxy=proxy,
             headless=True,
             i_know_what_im_doing=True,   # 有意为之: 干净观测者裸问, 不注入 geoip
+            # 强制 IPv4 出口: geoip 路径自带防双栈泄漏 pref (v5.5.0), 探针不带
+            # geoip 需手动补 — 002 实测本机 IPv6 (2607:9d00:...) 被 Google 判 HK
+            # (jump→google.com.hk) 而 IPv4 判 US, 不关 IPv6 探针读数会被带偏
+            firefox_user_prefs={"network.dns.disableIPv6": True},
         ) as probe_browser:
             probe_page = probe_browser.new_page()
             probe_page.set_default_timeout(45000)

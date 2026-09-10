@@ -251,3 +251,28 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 
 ### 收尾
 - 测试临时文件全部清理: 002 `/tmp/ips_probe_test/` (8 文件 + pycache, 逐个明确路径删除), 本地 4 个临时脚本; 服务三件套 active, 调度器正常接续
+
+## v5.6.25 干净观测者探针强制 IPv4 (2026-09-10, 002)
+
+### 现象
+- v5.6.24 上线后, 本机节点 cloudnium0-56B8 (直连无隧道, 目标 US) 首轮干净探针读出
+  `jump=www.google.com.hk prem=US music=` → `Jump:HK | Prem:US | Music:? -> WATCH`
+- 该机 IP 归属 US (ipinfo: 192.255.172.110 / Los Angeles / AS36352 HostPapa), 不该出 HK 信号
+
+### 根因
+- IPv4 vs IPv6 出口判定分裂: 002 实测
+  - IPv4 出口 192.255.172.110 → Google 跳转落 `www.google.com` (US) ✅
+  - IPv6 出口 2607:9d00:2000:39::13b → Google 跳转落 `www.google.com.hk` (HK) ❌
+- 裸浏览器默认 Happy Eyeballs 优先 IPv6 → 探针走了 IPv6 → 撞上 HK 判定
+- 养护浏览器因 `geoip=True` 自带 `network.dns.disableIPv6` (camoufox utils.py:924,
+  v5.5.0 防双栈泄漏 pref); 探针不带 geoip → 缺此 pref → 读数被 IPv6 带偏
+- 旧探针带 cookie 将区域记忆为 US, 掩盖了该底层差异; 干净探针首次暴露
+
+### 修复与验证
+- 探针 Camoufox 显式 `firefox_user_prefs={"network.dns.disableIPv6": True}` (与 geoip 路径同根 pref)
+- 002 实测 (本机直连 + 该 pref): `RESULT: {'jump': 'www.google.com', 'prem': 'US', 'music': 'US'}`
+  → 三核全绿, jump 由 google.com.hk 恢复为 www.google.com
+- 影响范围: 仅直连探针 (本机节点); 远程节点走 IPv4 SOCKS 隧道不受影响
+
+### 收尾
+- 临时诊断文件 /tmp/ips_v6_diag.py + .out 已删; 本地临时脚本已删

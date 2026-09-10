@@ -1,5 +1,11 @@
 # Changelog
 
+## [v5.6.25-fork] - 2026-09-10
+
+### 🐛 Fixes
+
+- **干净观测者探针强制 IPv4 出口** — 本机节点探针直连（无隧道）时浏览器默认 Happy Eyeballs 优先 IPv6。002 实测：同一主机 IPv4 `192.255.172.110` 被 Google 判 US（jump 留 www.google.com），IPv6 `2607:9d00:...` 被判 HK（jump→google.com.hk）。养护浏览器因 `geoip=True` 自动携带 `network.dns.disableIPv6`（v5.5.0 既有防双栈泄漏 pref），探针因不带 geoip 而缺此 pref —— 新探针上线后本机节点首轮读出假 HK 信号（Jump:HK + Prem:US → WATCH）。修复：探针 Camoufox 显式补同一根 pref，探针出口统一 IPv4。002 实测带 pref 后本机节点三核全绿（jump=www.google.com / prem=US / music=US）
+
 ## [v5.6.24-fork] - 2026-09-10
 
 ### 🐛 Fixes
