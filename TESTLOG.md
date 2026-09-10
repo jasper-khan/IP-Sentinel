@@ -232,3 +232,22 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 ### 顺带清理
 - 002 手工删除: 10 个 OTA 遗留 (逐个明确路径) + 4 个 09-08 遗留 Agent 装机沙箱 `/tmp/ips_install.{5sXjik,HU8Nnd,FtqKWm,Jb9GYh}` (各含 MANIFEST.sha256 + install_core.sh；后者 65435B 精确对应 core/install.sh 在 55f88dfb 那一版，与沙箱创建日 09-08 相符)
 - 删除后核验: 服务三件套 active、master.conf 5.6.22、sentinel.db 6 节点、timezones.json 哈希未变、logs/ 四个日志完好
+
+## v5.6.24 区域自检改"干净观测者"探针 (2026-09-10, 002)
+
+### 背景
+- 原探针复用养护浏览器的持久 profile + 累积 cookie: 测得的是"浏览器记住了目标区域"而非"Google 对这个 IP 的判定"。上游 PR #82 (剥离探测身份) 原则在浏览器化后回归 —— 上游用干净 curl 裸问, fork 迁移到浏览器后探针随之搬进养护浏览器, 三核全部被 cookie 污染
+- 修复: 会话主体浏览器结束后单独开一个非持久、无 `user_data_dir`、无指纹/geoip 注入的全新 Camoufox 实例, 走同一 SOCKS 隧道裸问三核。判定逻辑与全部消费端 (`.region`/`.verdicts.jsonl`/TG 面板/日报) 零改动
+- 附带: consent/sorry 墙按探测失效处理 (无信号≠漂移); YT 两核单次重试 (实测间歇变体/超时)
+
+### 002 实测 (HK 节点 C202605192-D5EC, 隧道 10869, 出口 154.219.119.103)
+- 完整会话 (新引擎临时副本, git blob 字节一致 sha256=7700c685): rc=0, 干净探针输出
+  `区域自检(干净观测者): jump=www.google.com prem= music=US` → 裁决 `target=HK Jump:US | Prem:? | Music:US -> DRIFT`, `.region` 正常落盘
+- 对照: 同节点 10:31 旧探针 (带 cookie) 读 `Jump:US | Prem:US | Music:US -> DRIFT` → **两侧一致**: 该 HK IP 对 Google 本来就是 US 判定 (DRIFT), 干净探针证实 cookie 未虚构区域; 旧探针在此节点读数属实, 而干净探针从结构上保证以后无需依赖 cookie 即可复核
+- 探针驱动 3 轮 (干净浏览器 + YT 重试): 三核全绿
+  `ROUND 1/2/3: {'jump':'www.google.com','prem':'US','music':'US'}`
+- 诊断记录: prem 单页独立诊断 `match=US` (813KB 页面无 consent 墙); 与 probe_region 同序时曾遇 prem 空 / music goto 超时各一次 → 加单次重试后 3 轮全提取成功
+- 干净探针 launch 时的 LeakWarning (proxy without geoip) 为有意行为 (裸问不注入 geoip), 生产调度器 `2>&1` 丢弃不可见
+
+### 收尾
+- 测试临时文件全部清理: 002 `/tmp/ips_probe_test/` (8 文件 + pycache, 逐个明确路径删除), 本地 4 个临时脚本; 服务三件套 active, 调度器正常接续
