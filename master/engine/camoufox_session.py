@@ -56,7 +56,9 @@ def log(msg):
 INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_init_script.
 // TZ 为脚本源码占位符 __TZ__ (运行前 .replace); 偏移全部动态计算 (DST 正确)。
 //
-// 覆盖 (主文档 realm; Worker 由 Camoufox config['timezone'] 原生覆盖):
+// 覆盖 (主文档 realm; Worker 由 Camoufox config['timezone'] 原生覆盖 —
+//   2026-09-10 002 实测: Worker 内 Date 构造/getTimezoneOffset/toString/Temporal
+//   均已按 config 时区正确, 无需注入):
 //   Intl.DateTimeFormat / Date.prototype 读与格式化 / Date 构造器 + Date.parse
 //   (歧义串与多参调用的 epoch 校正) / Temporal.Now 五方法 /
 //   Function.prototype.toString 注册表掩码 (引擎原生格式)。
@@ -98,21 +100,12 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
       } catch (e) {}
       return fn;
     }
-    // 构造器/工厂不能用 stripConstruct (Date override 自身要可 new) → 只注册
-    function maskCtor(fn, name, len) {
-      try {
-        Object.defineProperty(fn, "length", { value: len, configurable: true, enumerable: false, writable: false });
-        Object.defineProperty(fn, "name", { value: name, configurable: true, enumerable: false, writable: false });
-        _reg.set(fn, name);
-      } catch (e) {}
-      return fn;
-    }
     var _fts = ({ toString() {
       var n = _reg.get(this);
       if (n !== undefined) return _np[0] + n + _np[1];
       return _origFTS.call(this);
     } }).toString;
-    maskCtor(_fts, "toString", 0);
+    mask(_fts, "toString", 0);
     Function.prototype.toString = _fts;
   } catch (e) { return; }
 
@@ -202,26 +195,36 @@ INIT_TZ_JS = r'''// Hardened timezone override — injected via playwright add_i
     Date.prototype.toString = stripConstruct(function () { return localString(this); }); mask(Date.prototype.toString, "toString", 0);
     Date.prototype.toTimeString = stripConstruct(function () { return timeString(this); }); mask(Date.prototype.toTimeString, "toTimeString", 0);
     Date.prototype.toDateString = stripConstruct(function () { return dateString(this); }); mask(Date.prototype.toDateString, "toDateString", 0);
-    // toLocaleString family: 透传调用方 locales/options, 仅在 options 无 timeZone 时
-    // 强制 TZ (与原生行为对齐: 调用方参数优先, 默认时区替换为伪装值)
-    Date.prototype.toLocaleString = stripConstruct(function () {
-      var args = Array.prototype.slice.call(arguments);
-      if (args.length < 2 || args[1] == null) args[1] = {};
-      if (typeof args[1] === "object" && !args[1].timeZone) args[1] = { ...args[1], timeZone: TZ };
-      return new _RDTF(args[0], args[1]).format(this);
-    }); mask(Date.prototype.toLocaleString, "toLocaleString", 0);
-    Date.prototype.toLocaleDateString = stripConstruct(function () {
-      var args = Array.prototype.slice.call(arguments);
-      if (args.length < 2 || args[1] == null) args[1] = {};
-      if (typeof args[1] === "object" && !args[1].timeZone) args[1] = { ...args[1], timeZone: TZ };
-      return new _RDTF(args[0], args[1]).format(this);
-    }); mask(Date.prototype.toLocaleDateString, "toLocaleDateString", 0);
-    Date.prototype.toLocaleTimeString = stripConstruct(function () {
-      var args = Array.prototype.slice.call(arguments);
-      if (args.length < 2 || args[1] == null) args[1] = {};
-      if (typeof args[1] === "object" && !args[1].timeZone) args[1] = { ...args[1], timeZone: TZ };
-      return new _RDTF(args[0], args[1]).format(this);
-    }); mask(Date.prototype.toLocaleTimeString, "toLocaleTimeString", 0);
+    // toLocaleString family: 透传调用方 locales/options。三个方法各自的默认分量集
+    // 不同 (toLocaleString=日期+时间 / toLocaleDateString=仅日期 / toLocaleTimeString=
+    // 仅时间), 仅当调用方 options 未给任何 date/time 分量或 style 时注入各自默认,
+    // 且无 timeZone 时强制 TZ (调用方参数优先, 默认时区替换为伪装值)
+    var _COMPONENT_PROPS = ["year","month","day","weekday","hour","minute","second",
+                            "dateStyle","timeStyle","era","hour12","hourCycle",
+                            "timeZoneName","dayPeriod","fractionalSecondDigits"];
+    function hasAnyComponent(o) {
+      for (var i = 0; i < _COMPONENT_PROPS.length; i++) {
+        if (o[_COMPONENT_PROPS[i]] !== undefined) return true;
+      }
+      return false;
+    }
+    function toLocaleImpl(defComponents) {
+      return function () {
+        var args = Array.prototype.slice.call(arguments);
+        var o = (args.length < 2 || args[1] == null || typeof args[1] !== "object") ? {} : args[1];
+        var opts = {};
+        for (var k in o) opts[k] = o[k];
+        if (!hasAnyComponent(opts)) {
+          var dc = defComponents;
+          for (var dk in dc) opts[dk] = dc[dk];
+        }
+        if (!opts.timeZone) opts.timeZone = TZ;
+        return new _RDTF(args[0], opts).format(this);
+      };
+    }
+    Date.prototype.toLocaleString = stripConstruct(toLocaleImpl({ year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" })); mask(Date.prototype.toLocaleString, "toLocaleString", 0);
+    Date.prototype.toLocaleDateString = stripConstruct(toLocaleImpl({ year: "numeric", month: "numeric", day: "numeric" })); mask(Date.prototype.toLocaleDateString, "toLocaleDateString", 0);
+    Date.prototype.toLocaleTimeString = stripConstruct(toLocaleImpl({ hour: "numeric", minute: "numeric", second: "numeric" })); mask(Date.prototype.toLocaleTimeString, "toLocaleTimeString", 0);
     } catch (e) { /* 读/格式化域失败 → 原生保留 */ }
 
     // ---- Date.prototype 本地分量 getter (GeoSpoof date-getters 移植, Firefox 走 formatToParts 路径) ----
