@@ -1,5 +1,13 @@
 # Changelog
 
+## [v5.6.23-fork] - 2026-09-10
+
+### 🐛 Fixes
+
+- **OTA 临时文件不再累积 (回收历史遗留)** — `tg_master.sh` 的 OTA 用 `mktemp` 在 `${MASTER_DIR}` 建 `ota_install.*.sh` + `ota_manifest.*`, 但只在**熔断分支** `rm`, 成功路径不回收 → 每升一版留一对 (各约 5KB)。002 实测: 09-09 00:06 至 09-10 08:56 已积五对。修复: 在创建新文件**之前**清一次历史遗留 —— 此刻目录里存在的必属历史轮次; Linux unlink 不影响已打开的 fd, 即便有 OTA 正在读亦安全
+  - 匹配范围经沙箱验证: 只命中 `ota_install.*.sh` / `ota_manifest.*`; 同目录的 `sentinel.db`/`master.conf`/`tg_master.sh`/`engine.log` 及形近名 (`ota_install_notes.txt`/`ota_manifest_backup`) 均不受影响; 同名目录不被 `rm -f` 触及
+  - 已在 002 手工清空既有积压的 10 个文件 (另清理 4 个 09-08 遗留的 Agent 装机沙箱 `/tmp/ips_install.*`)
+
 ## [v5.6.22-fork] - 2026-09-10
 
 ### 🔒 Hardening

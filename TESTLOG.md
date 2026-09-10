@@ -213,3 +213,22 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 - 两轴关系: pip 包版本决定默认拉取哪个浏览器构建, 构建本身可单独指定; 正常情况锁 pip 包即锁定默认组合
 - 该组合"已知良好"的实测依据: `config['timezone']` 在主文档与 Worker 两 realm 均生效 (v5.6.21 三组对照 B 组证据), 六节点 tz 全部 by_coords 精确命中, 养护会话 rc=0
 - 日志措辞提醒: 装机输出 `✅ Camoufox 版本已锁定: pip 0.5.6 / 浏览器 152.0.4-beta.30` 中的 "pip" 指安装工具, 0.5.6 是 camoufox 包版本, 非 pip 自身版本
+
+## v5.6.23 OTA 临时文件回收 (2026-09-10, 002)
+
+### 问题确认
+- `tg_master.sh` OTA 分支用 `mktemp "${MASTER_DIR}/ota_install.XXXXXX.sh"` + `ota_manifest.XXXXXX` 建两个文件，仅熔断分支 `rm`，成功路径不回收
+- 002 实测积压: 09-09 00:06 / 07:14 / 12:28 / 23:46 / 09-10 08:56 共五对 (ota_install 各 3512B, ota_manifest 1677~1763B)
+- 删除安全性核验: 尺寸逐一对得上 git blob (ota_install=3512 与 install_master.sh 各 tag 一致; ota_manifest 1677=v5.6.20/21, 1763=v5.6.22)，即全为公开仓库文件的副本，可随时从 tag 取回
+
+### 修复与验证
+- 在创建新文件之前清一次历史遗留；沙箱验证匹配范围:
+  - 命中并删除: ota_install.Nw3l1I.sh / ota_install.abc123.sh / ota_manifest.qqllAg / ota_manifest.xyz
+  - 保留: sentinel.db / master.conf / tg_master.sh / engine.log
+  - 保留 (形近名): ota_install_notes.txt / ota_manifest_backup
+  - 保留 (同名目录): ota_install_dir.sh —— `rm -f` 不加 `-r` 不动目录
+- `bash -n` 通过
+
+### 顺带清理
+- 002 手工删除: 10 个 OTA 遗留 (逐个明确路径) + 4 个 09-08 遗留 Agent 装机沙箱 `/tmp/ips_install.{5sXjik,HU8Nnd,FtqKWm,Jb9GYh}` (各含 MANIFEST.sha256 + install_core.sh；后者 65435B 精确对应 core/install.sh 在 55f88dfb 那一版，与沙箱创建日 09-08 相符)
+- 删除后核验: 服务三件套 active、master.conf 5.6.22、sentinel.db 6 节点、timezones.json 哈希未变、logs/ 四个日志完好

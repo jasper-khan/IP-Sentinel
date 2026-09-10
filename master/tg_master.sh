@@ -696,6 +696,11 @@ while true; do
                     # [Safe OTA] tag 锚定 + MANIFEST 验签 (对齐 Agent 侧 V3 修复，
                     # 补齐此前 master/install_master.sh 仅 bash -n 无哈希校验的缺口)
                     # [V5 安全修复] mktemp 私有路径替代可预测的 /tmp/install_master.sh
+                    # [回收] 清理历史 OTA 遗留: 这两个文件由 mktemp 建于本目录, 原实现只在
+                    # 熔断分支 rm, 成功路径不回收 —— 每升一版留一对 (各约 5KB), 实测 09-09
+                    # 至 09-10 已积五对。放在创建新文件之前执行: 此刻目录里存在的必属历史
+                    # 轮次 (Linux unlink 不影响已打开的 fd, 即便有 OTA 正在读亦安全)。
+                    rm -f "${MASTER_DIR}"/ota_install.*.sh "${MASTER_DIR}"/ota_manifest.* 2>/dev/null
                     TAG_URL=$(tag_raw_url "$REMOTE_VER")
                     MASTER_OTA_SCRIPT=$(mktemp "${MASTER_DIR}/ota_install.XXXXXX.sh")
                     MANIFEST_TMP=$(mktemp "${MASTER_DIR}/ota_manifest.XXXXXX")
