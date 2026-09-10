@@ -507,14 +507,20 @@ def probe_region(page):
         pass
     for key, url in (("prem", "https://www.youtube.com/premium"),
                      ("music", "https://music.youtube.com/")):
-        try:
-            page.goto(url, wait_until="domcontentloaded")
-            time.sleep(random.randint(2, 5))
-            m = _YT_GL_RE.search(page.content())
-            if m:
-                result[key] = m.group(1).upper()
-        except Exception:
-            pass
+        # [重试] YouTube 对全新浏览器间歇下发变体/慢响应 (2026-09-10 002 实测:
+        # 同序三连测 prem 空一次 / music goto 超时一次), 单次重试恢复大部分
+        for attempt in (1, 2):
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+                time.sleep(random.randint(2, 5))
+                m = _YT_GL_RE.search(page.content())
+                if m:
+                    result[key] = m.group(1).upper()
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+
     return result
 
 
