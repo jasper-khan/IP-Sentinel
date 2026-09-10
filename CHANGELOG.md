@@ -1,5 +1,12 @@
 # Changelog
 
+## [v5.6.24-fork] - 2026-09-10
+
+### 🐛 Fixes
+
+- **区域自检改"干净观测者"探针 (剥离养护身份)** — 原探针复用养护浏览器的持久 profile 与累积 cookie，测得的是"浏览器记住了目标区域"而非"Google 对这个 IP 的判定"（cookie 让 Google 凭偏好作答而非凭 IP）。这是上游 PR #82（剥离探测身份，干净 UA 裸问）原则在浏览器化后的回归：fork 把养护搬进浏览器时探针也随之搬进养护浏览器，三核全部被 cookie 污染。现改为：会话主体浏览器结束后，单独开一个非持久、无 `user_data_dir`、无指纹/geoip 注入的全新 Camoufox 实例，走同一条 SOCKS 隧道（出口仍是节点 IP）裸问三核。判定逻辑 `region_verdict`、`.region`/`.verdicts.jsonl` 落盘、TG 面板、日报等消费端零改动
+- **consent 墙处理** — 干净请求（无同意记录）可能落在 `consent.google.com`，原逻辑会把它当漂移信号计（单信号 → WATCH 误报）；现按探测失效处理（无信号≠漂移），裁决由 YT 两核兜底，对齐上游"YT 主导、容忍 Jump 失败"的裁决本意
+
 ## [v5.6.23-fork] - 2026-09-10
 
 ### 🐛 Fixes

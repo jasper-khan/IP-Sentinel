@@ -14,6 +14,10 @@ IP-Sentinel 浏览器养护引擎 (Camoufox 会话)
 - 行为层: Google 搜索区域关键词 + news + 区域白名单站点,
   真实停留/滚动;不注入 gl/hl URL 参数 (curl 时代痕迹)
 - UA/指纹完全交给 Camoufox 自洽管理,不外部注入
+- 区域自检用"干净观测者"探针: 会话主体浏览器结束后单独开一个非持久、
+  无 profile/cookie/指纹注入的全新 Camoufox 实例, 走同一隧道裸问三核。
+  绝不复用养护浏览器 —— 其累积 cookie 会让 Google 凭偏好作答而非凭 IP
+  (对齐上游 PR #82 剥离探测身份原则的浏览器版)
 
 用法:
   camoufox_session.py --node <NODE_NAME> --region <REGION_CODE> \
@@ -413,14 +417,36 @@ def run_session(node, region_code, socks_port, persona, keywords, focus="all"):
                 except Exception as e:
                     log("WARN 白名单 %s 失败: %s" % (url, e))
 
-        # --- 会话尾: 区域自检 (三核探测 + 漂移/送中落盘) ---
-        probe = probe_region(page)
-        region_verdict(node, region_code, probe)
-
         try:
             page.close()
         except Exception:
             pass
+
+    # ==========================================================
+    # [区域自检 · 干净观测者探针] (v5.6.24)
+    # 探针绝不复用养护浏览器的持久 profile/cookie —— 那测得的是
+    # "浏览器记住了目标区域"而非"Google 对这个 IP 的判定" (上游
+    # PR #82 剥离探测身份原则的浏览器版: 上游用干净 curl 裸问)。
+    # 这里单独开一个非持久、无 user_data_dir、无指纹/geoip 注入的
+    # 全新实例, 走同一条 SOCKS 隧道 → 出口仍是节点 IP, 零累积状态。
+    # 注意: 干净请求可能落在 consent 墙 (无同意记录), Jump 核按失效
+    # 处理, 裁决由 YT 两核兜底 —— 上游"YT 主导容忍 Jump 失败"的本意。
+    # ==========================================================
+    probe = {}
+    try:
+        with Camoufox(
+            proxy=proxy,
+            headless=True,
+            i_know_what_im_doing=True,   # 有意为之: 干净观测者裸问, 不注入 geoip
+        ) as probe_browser:
+            probe_page = probe_browser.new_page()
+            probe_page.set_default_timeout(45000)
+            probe = probe_region(probe_page)
+        log("区域自检(干净观测者): jump=%s prem=%s music=%s"
+            % (probe.get("jump"), probe.get("prem"), probe.get("music")))
+    except Exception as e:
+        log("WARN 干净探针失败, 本轮无区域自检: %s" % e)
+    region_verdict(node, region_code, probe)
 
     log("会话结束 (focus=%s), profile 已持久化: %s" % (focus, profile_dir))
 
@@ -463,12 +489,20 @@ def probe_region(page):
     - jump: google.com 落地的最终域名 (被送中 IP 会 302 到 google.com.hk)
     - prem: YouTube Premium 页面暴露的 contentRegion/GL
     - music: YouTube Music 页面暴露的 contentRegion/GL
+
+    注意: 调用方必须传入**干净观测者**页面 (非持久浏览器, 无养护 cookie);
+    复用养护浏览器会让 Google 凭 cookie 作答而非凭 IP。干净请求无同意记录时
+    可能落在 consent/sorry 墙, 此时 jump 按失效处理 (无信号≠漂移), 由
+    YT 两核兜底裁决。
     """
     result = {"jump": "", "prem": "", "music": ""}
     try:
         page.goto("https://www.google.com/", wait_until="domcontentloaded")
         time.sleep(random.randint(2, 6))
-        result["jump"] = urlparse(page.url).netloc
+        landing = urlparse(page.url).netloc
+        # 干净观测者可能落在 consent/sorry 墙 (无同意记录), 非漂移, 按探测失效处理
+        if landing and "consent.google" not in landing and "sorry.google" not in landing:
+            result["jump"] = landing
     except Exception:
         pass
     for key, url in (("prem", "https://www.youtube.com/premium"),
