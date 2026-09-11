@@ -54,18 +54,30 @@ for chat in $CHATS; do
     while IFS='|' read -r n alias region ip; do
         [ -z "$n" ] && continue
         N=$((N+1))
-        # 一遍扫 24h: 会话数 / 区域自检达成 / 白名单深访
-        read sess okv badv trust <<< "$(awk -v n="$n" -v cut="$CUTOFF" '
+        # 一遍扫 24h: 会话数以"区域自检"行为准 (每会话恰好一条, 与达成率分母同源,
+        # 消除"次数 12 判定 13"的窗口错位); 判定分级计数 OK/DRIFT/WATCH/SINICIZED/失效
+        read sess okv driftv watchv siniv failv trust <<< "$(awk -v n="$n" -v cut="$CUTOFF" '
             { ts=substr($0,2,19) }
             ts < cut { next }
-            index($0,"节点 " n " 本轮会话结束")>0 { sess++ }
-            index($0,"[" n "]")>0 {
-                if (index($0,"区域自检:")>0) { if(index($0,"-> OK")>0) okv++; else badv++ }
-                if (index($0,"白名单站点完成")>0) trust++
+            index($0,"[" n "]")>0 && index($0,"区域自检:")>0 {
+                sess++
+                if    (index($0,"-> OK")>0)          okv++
+                else if (index($0,"-> DRIFT")>0)     driftv++
+                else if (index($0,"-> WATCH")>0)     watchv++
+                else if (index($0,"-> SINICIZED")>0) siniv++
+                else failv++
             }
-            END { print (sess+0), (okv+0), (badv+0), (trust+0) }' "$LOG" 2>/dev/null)"
-        totv=$((okv+badv)); GTOTAL=$((GTOTAL+sess)); TTOTAL=$((TTOTAL+trust))
+            index($0,"[" n "]")>0 && index($0,"白名单站点完成")>0 { trust++ }
+            END { print (sess+0),(okv+0),(driftv+0),(watchv+0),(siniv+0),(failv+0),(trust+0) }' "$LOG" 2>/dev/null)"
+        totv=$((okv+driftv+watchv+siniv+failv))
+        GTOTAL=$((GTOTAL+sess)); TTOTAL=$((TTOTAL+trust))
         gr="—"; [ "$totv" -gt 0 ] && gr=$(awk "BEGIN{printf \"%.0f\", ($okv/$totv)*100}")
+        # 判定分级明细 (只列非零, 避免一屏红)
+        parts="✅${okv}"
+        [ "$driftv" -gt 0 ] && parts="${parts} 🟠${driftv}"
+        [ "$watchv" -gt 0 ] && parts="${parts} 🟡${watchv}"
+        [ "$siniv" -gt 0 ] && parts="${parts} 🔴${siniv}"
+        [ "$failv" -gt 0 ] && parts="${parts} ⚪${failv}"
         # 时区 + 城市
         tz=$(grep "启动会话" "$LOG" 2>/dev/null | grep -F "[$n]" | tail -1 | grep -o 'tz=[^ ]*' | cut -d= -f2)
         [ -z "$tz" ] && tz="?"
@@ -82,29 +94,33 @@ for chat in $CHATS; do
             [ -n "$rts" ] && lastchk=$(date -u -d "@$rts" '+%m-%d %H:%M UTC' 2>/dev/null)
         fi
         em=$(verdict_emoji "$verdict")
-        [ "$verdict" != "OK" ] && [ "$verdict" != "未检测" ] && FLAG=$((FLAG+1))
+        # 报警只认送中 (SINICIZED): 已接受的 DRIFT 恒常态不每天报警 (2026-09-11 用户反馈)
+        [ "$verdict" = "SINICIZED" ] && FLAG=$((FLAG+1))
         showip=$(echo "$ip" | tr '_' ' ' | awk '{print $1}')
         fl=$(get_flag "$region"); loc="$region"; [ -n "$city" ] && loc="$region / $city"
 
         # Google 区域纠偏行
         if [ "$totv" -gt 0 ]; then
-            gline="🎯 *Google 区域纠偏*: 24h ${sess} 次 · 达成率 *${gr}%* (✅${okv} 🔴${badv})"
+            gline="🎯 *Google 区域纠偏*: 24h ${sess} 次 · 达成率 *${gr}%* (${parts})"
         elif [ "$sess" -gt 0 ]; then
             gline="🎯 *Google 区域纠偏*: 24h ${sess} 次"
         else
-            gline="🎯 *Google 区域纠偏*: 近 24h 无会话 (调度 90min/轮)"
+            gline="🎯 *Google 区域纠偏*: 近 24h 无会话 (调度 45min/轮)"
         fi
         # 自检详情行
         if [ "$verdict" = "未检测" ]; then
             vline="   最近自检: ⚪ 未检测"
+        elif [ "$verdict" = "OK" ]; then
+            # OK 节点压缩成一行: 三核全是目标区, 无信息量
+            vline="   最近自检: 🟢 目标达成 · ${lastchk:-?}"
         else
             case "$verdict" in
-                OK) vcn="目标达成";; WATCH) vcn="观察";; DRIFT) vcn="区域漂移";;
-                SINICIZED) vcn="送中";; *) vcn="$verdict";;
+                WATCH) vcn="观察";; DRIFT) vcn="区域漂移";;
+                SINICIZED) vcn="送中";; PROBE_FAIL) vcn="探针失效";; *) vcn="$verdict";;
             esac
             vline="   最近自检: ${em} ${vcn} (Jump: ${jgl:-?} | Prem: ${prem:-?} | Music: ${music:-?})"
             # 异常时附原始证据 (落地域名)
-            case "$verdict" in OK|PROBE_FAIL) ;; *) [ -n "$jump" ] && vline="${vline} · ${jump}";; esac
+            case "$verdict" in PROBE_FAIL) ;; *) [ -n "$jump" ] && vline="${vline} · ${jump}";; esac
             vline="${vline} · ${lastchk:-?}"
         fi
         card="${fl} *${alias}*  ·  ${loc}
@@ -119,7 +135,7 @@ ${card}"
     done <<< "$NODES"
 
     ALERT=""; [ "$FLAG" -gt 0 ] && ALERT="
-⚠️ *${FLAG} 个节点区域异常 (送中/漂移), 请留意*"
+⚠️ *${FLAG} 个节点被判定送中, 请处理*"
     MSG="📊 *IP-Sentinel 每日养护简报*
 📅 ${TODAY} UTC · 节点 ${N} 台 · 🎯纠偏 ${GTOTAL} 次 · 🔰净化 ${TTOTAL} 次${ALERT}
 ═══════════════════════${CARDS}
