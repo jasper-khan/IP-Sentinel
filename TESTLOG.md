@@ -276,3 +276,28 @@ curl 直连不跳转 / YouTube GL+contentRegion=US / ipinfo geo=US-LA。
 
 ### 收尾
 - 临时诊断文件 /tmp/ips_v6_diag.py + .out 已删; 本地临时脚本已删
+
+## v5.6.26 调度间隔参数 OTA 持久化 + 002 调至 45min (2026-09-11)
+
+### 背景
+- 用户确认将养护间隔从 90min(5400) 提到 45min(2700)。先做容量核实: 近 11.3h (v5.6.25 时代) 实测 6 节点 34 会话、全局平均 9.1min/会话、槽位利用率仅 13% → 瓶颈是间隔门禁而非机器/并发; 内存峰值由并发(2)决定不随频率变。45min 档 ≈ 51% 利用率, 安全
+
+### 配置传播链核查 (OTA 持久性的两个事实)
+- OTA/升级路径 (`UPGRADE_MODE=true`) 的 `do_master_config` **不重写 master.conf**, 只 append 缺失键 → master.conf 是持久家
+- 但 `engine_setup.sh` 写 systemd 单元用 `${ENGINE_MIN_INTERVAL:-5400}` 只认环境变量, 不读 master.conf → 只改单元/master.conf 会被下次 OTA 重置回 5400
+- 修复: `do_engine_setup()` 写单元前先 `[ -f master.conf ] && . master.conf`, master.conf 成为间隔/并发唯一持久来源
+
+### 002 线上应用与验证
+- master.conf append `ENGINE_MIN_INTERVAL="2700"` (幂等)
+- systemd 单元 `ENGINE_MIN_INTERVAL=5400 → 2700`, daemon-reload, restart ip-sentinel-engine (当时 1 会话在跑, disowned 不受影响)
+- 调度器重启日志确认: `========== 会话调度器启动 (并发=2, 间隔=2700s) ==========` (00:24:25 UTC)
+- 服务三件套 active
+
+### 容量核算 (2 并发 + 实测 9.1min/会话, 周期=间隔+时长)
+| 间隔 | 会话/天 | 槽位利用率 |
+|---|---|---|
+| 90 现状 | ~87 | 27% |
+| 60 | ~125 | 40% |
+| **45 选用** | **~160** | **51%** |
+| 30 | ~221 | 70% (上限) |
+| 20 | ~298 | 94% (边缘不推荐) |
