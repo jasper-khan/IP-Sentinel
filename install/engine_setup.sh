@@ -23,6 +23,11 @@ CAMOUFOX_BROWSER_EXPECTED="152.0.4-beta.30"
 do_engine_setup() {
     echo -e "\n[5/5] 正在部署浏览器养护引擎 (Camoufox) ..."
 
+    # [配置持久化] ENGINE_CONCURRENCY/ENGINE_MIN_INTERVAL 以 master.conf 为准:
+    # 先 source 已固化的值, 下方 `${VAR:-默认}` 才能取到 (否则 OTA 重写
+    # systemd 单元时每次都会把调好的间隔/并发重置回默认 5400/2)
+    [ -f "${MASTER_DIR}/master.conf" ] && . "${MASTER_DIR}/master.conf"
+
     # ---------- 0. 浏览器系统依赖 (Debian 最小安装无 GTK,实测 XPCOMGlueLoad 失败) ----------
     if command -v apt-get >/dev/null 2>&1; then
         apt-get install -y --no-install-recommends libgtk-3-0 libx11-xcb1 libxcb-shm0 libxcomposite1 libxdamage1 libxrandr2 libasound2 >/dev/null 2>&1 || true

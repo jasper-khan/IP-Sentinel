@@ -1,5 +1,11 @@
 # Changelog
 
+## [v5.6.26-fork] - 2026-09-11
+
+### 🐛 Fixes
+
+- **调度间隔/并发参数 OTA 持久化** — `engine_setup.sh` 写 systemd 单元时只用 `${ENGINE_MIN_INTERVAL:-5400}`/`${ENGINE_CONCURRENCY:-2}` 环境变量，不读 `master.conf`。调好的间隔（如本次 45min=2700）一旦 OTA 重写单元就被重置回默认，且 OTA 路径不重写 master.conf（只 append 缺失键）→ master.conf 是持久家。修复：`do_engine_setup()` 写单元前先 source `master.conf`（存在才 source），`master.conf` 成为间隔/并发的唯一持久来源。002 已按此把 `ENGINE_MIN_INTERVAL` 调为 2700（45 分钟）
+
 ## [v5.6.25-fork] - 2026-09-10
 
 ### 🐛 Fixes
