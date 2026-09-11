@@ -138,26 +138,17 @@ else
     # agent 简报只报 agent 真实状态, 养护统计由 Master 每日简报承载 (不重复)
     DAEMON_STATE=$(systemctl is-active ip-sentinel-agent-daemon 2>/dev/null)
     [ "$DAEMON_STATE" = "active" ] && DAEMON_ICON="🟢" || DAEMON_ICON="🔴"
-    DAEMON_SINCE=$(systemctl show ip-sentinel-agent-daemon -p ActiveEnterTimestamp --value 2>/dev/null | awk '{print $1,$2,$3}')
-    LAST_MAINT=$(echo "$LOG_CONTENT" | grep "系统维护巡检结束" | tail -n 1 | awk '{print $1,$2}' | tr -d '[]')
+    DAEMON_SINCE=$(systemctl show ip-sentinel-agent-daemon -p ActiveEnterTimestamp --value 2>/dev/null | awk '{print $2,$3}' | cut -c1-16)
+    [ -z "$DAEMON_SINCE" ] && DAEMON_SINCE="未知"
+    LAST_MAINT=$(echo "$LOG_CONTENT" | grep "系统维护巡检结束" | tail -n 1 | awk '{print $1,$2}' | tr -d '[]' | cut -c1-16)
     [ -z "$LAST_MAINT" ] && LAST_MAINT="暂无记录"
 
-    MSG="📊 **IP-Sentinel 每日简报 (${FLAG} ${REGION_NAME})**
-----------------------------
-📍 **节点名称**: \`${NODE_ALIAS}\`
-📡 **出口 IP**: \`${CURRENT_IP}\`
-🛡️ **IP 属性**: ${IP_TYPE}"
-
-    # [引擎代管] 本地 curl 养护已移除,养护统计由 Master 引擎日志承载
-
-    # 追加 agent 引擎状态段
-    MSG="$MSG
-
-🩺 **节点引擎状态**
-守护进程: ${DAEMON_ICON} ${DAEMON_STATE:-未知} (自 ${DAEMON_SINCE:-未知})
-指令端口: \`${AGENT_PORT:-未知}\`
-最近系统巡检: ${LAST_MAINT}"
-
+    MSG="📊 *节点日报 · ${NODE_ALIAS}*  (${FLAG} ${REGION_CODE})
+📍 出口 IP: \`${CURRENT_IP}\` · ${IP_TYPE}
+────────────────────
+🩺 守护进程: ${DAEMON_ICON} ${DAEMON_STATE:-未知} · 运行自 ${DAEMON_SINCE}
+🔌 指令端口: \`${AGENT_PORT:-未知}\`
+🧹 最近巡检: ${LAST_MAINT}"
 fi
 
 # ==========================================================
@@ -165,37 +156,29 @@ fi
 # ==========================================================
 LOCAL_VER="${AGENT_VERSION:-未知}"
 # [时间线对齐] 强制采用绝对 UTC 时间消除多节点的系统偏差
-REPORT_UTC_TIME=$(date -u "+%Y-%m-%d %H:%M:%S UTC")
+REPORT_UTC_TIME=$(date -u "+%Y-%m-%d %H:%M UTC")
 
 REPO_RAW_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
-REMOTE_VER=$(curl -s -m 3 "${REPO_RAW_URL}/version.txt" | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+VERSION_LINES=$(curl -s -m 3 "${REPO_RAW_URL}/version.txt")
+MASTER_VER=$(echo "$VERSION_LINES" | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+REMOTE_VER=$(echo "$VERSION_LINES" | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
 
-MSG="$MSG
-----------------------------
-🛡️ **系统引擎状态**
-⏱️ 战报生成: \`${REPORT_UTC_TIME}\`"
-
-# 根据云端版本一致性自动渲染更新提示面板
-if [ -n "$REMOTE_VER" ]; then
-    if [ "$REMOTE_VER" != "$LOCAL_VER" ]; then
-        MSG="$MSG
-当前运行版本: \`v${LOCAL_VER}\`
-✨ **发现新版本**: \`v${REMOTE_VER}\` (建议更新)
-💡 *系统提示：检测到新版引擎，建议通过中枢控制台执行 OTA 热更新！*"
-    else
-        MSG="$MSG
-当前运行版本: \`v${LOCAL_VER}\` (✅已是最新)
-💡 *IP-Sentinel 持续为您守护节点。*
-*若本项目对您有帮助，欢迎前往 GitHub 赐予 🌟*"
-    fi
+# 版本分轨显示: 中枢/代理版本互相独立, 避免"代理 5.6.11 显示已是最新"与中枢不齐的困惑
+if [ -n "$REMOTE_VER" ] && [ "$REMOTE_VER" != "$LOCAL_VER" ]; then
+    VER_NOTE="✨ 代理有新版 v${REMOTE_VER}, 可 OTA"
 else
-    MSG="$MSG
-当前运行版本: \`v${LOCAL_VER}\`
-💡 *IP-Sentinel 持续为您守护节点。*
-*若本项目对您有帮助，欢迎前往 GitHub 赐予 🌟*"
+    VER_NOTE="✅ 与仓库一致"
 fi
+MSG="$MSG
+────────────────────
+⚙️ 中枢 v${MASTER_VER:-?} · 代理 v${LOCAL_VER} ${VER_NOTE}
+⏱️ ${REPORT_UTC_TIME}"
 
 # --- [下发 API 载荷] ---
+if [ "${TG_REPORT_DRYRUN:-0}" = "1" ]; then
+    printf '%s\n' "$MSG"
+    exit 0
+fi
 JSON_PAYLOAD=$(jq -n \
   --arg cid "$CHAT_ID" \
   --arg txt "$MSG" \

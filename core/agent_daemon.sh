@@ -457,7 +457,8 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
 
                 # 将升级逻辑进行 Base64 深层封装，免疫 Popen 或 Systemd 传递带来的指令注入风险
                 # [Safe OTA] 版本守卫 (远端不比本地新即跳过并回执) + tag 锚定
-                # (发布规范: tag = v${VER}-fork, MANIFEST 与代码同 tag 拉取)
+                # (发布规范: agent 通道 tag = v${VER}-agent, master 通道仍为 v${VER}-fork;
+                # 两通道版本独立且共享 tag 命名空间, 2026-09-11 拆分防历史 master tag 撞车)
                 ota_script = f"""
 export SILENT_OTA="true"
 LOG=/opt/ip_sentinel/logs/ota_upgrade.log
@@ -474,12 +475,12 @@ if ! ver_lt "$LOCAL_VER" "$REMOTE_VER"; then
     echo "OTA Skip: local ($LOCAL_VER) >= remote ($REMOTE_VER)" > "$LOG"
     exit 0
 fi
-TAG_URL=$(echo "{repo_url}" | sed 's|/main$||')/v${{REMOTE_VER}}-fork
+TAG_URL=$(echo "{repo_url}" | sed 's|/main$||')/v${{REMOTE_VER}}-agent
 OTA_TMP=$(mktemp /tmp/ips_ota.XXXXXX.sh)
 MANIFEST_TMP=$(mktemp /tmp/ips_ota_manifest.XXXXXX)
 curl -fsSL --connect-timeout 10 --retry 2 "${{TAG_URL}}/MANIFEST.sha256" -o "$MANIFEST_TMP" || MANIFEST_TMP=""
 if [ ! -s "$MANIFEST_TMP" ]; then
-    echo "OTA Aborted: MANIFEST.sha256 unavailable (tag v${{REMOTE_VER}}-fork)" > "$LOG"
+    echo "OTA Aborted: MANIFEST.sha256 unavailable (tag v${{REMOTE_VER}}-agent)" > "$LOG"
     exit 0
 fi
 curl -fsSL --connect-timeout 10 --retry 2 "${{TAG_URL}}/core/install.sh" -o "$OTA_TMP" || OTA_TMP=""
