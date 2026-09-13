@@ -66,7 +66,8 @@ INSTALL_DIR="/opt/ip_sentinel"
 CONFIG_FILE="${INSTALL_DIR}/config.conf"
 
 # [网络容灾] 挂载双栈并利用防抖重试护甲，从远端解析运行态版本约束
-TARGET_VERSION=$( (curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt" || curl -4 -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt") 2>/dev/null | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+VERSION_URL="${REPO_RAW_URL}/version.txt?t=$(date +%s)"
+TARGET_VERSION=$( (curl -fsSL --connect-timeout 5 --retry 2 "$VERSION_URL" || curl -4 -fsSL --connect-timeout 5 --retry 2 "$VERSION_URL") 2>/dev/null | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
 TARGET_VERSION=${TARGET_VERSION:-"4.1.1"}
 
 version_lt() {
@@ -349,9 +350,8 @@ done
 rm -f /etc/local.d/ip_sentinel.start 2>/dev/null
 
 if [ "$UPGRADE_MODE" == "true" ]; then
-    # [v4.2.2 终极保障] 平滑升级时强制销毁旧版 TLS 证书与旧版 IP 缓存，逼迫下层组件重铸健康双栈装甲
-    rm -f "${INSTALL_DIR}/core/cert.pem" "${INSTALL_DIR}/core/key.pem" "${INSTALL_DIR}/core/.last_ip" 2>/dev/null
-    echo -e "🧹 历史底层缓存及残旧 TLS 证书已强制销毁，准备重铸安全装甲。"
+    # 普通 OTA 保留节点 TLS 身份；旧版/损坏证书仍由 agent_daemon 自检后重建
+    echo -e "🔐 现有 TLS 身份将在核心换血前校验并继承。"
 
     if [ "$KEEP_LOGS" == "false" ]; then
         rm -rf "${INSTALL_DIR}/logs" 2>/dev/null
@@ -968,6 +968,24 @@ if [ -z "$CORE_OK" ]; then
     echo "🛡️ 防砖机制触发：已中止覆盖，旧版哨兵引擎仍安全存活中。"
     rm -rf "$TMP_CORE"
     exit 1
+fi
+
+# [身份连续性] 核心目录采用整组原子替换，升级时须把有效证书对带入新目录。
+# 仅继承可解析且公私钥匹配的 RSA 证书；缺失/损坏时保持为空，由新 daemon 重建。
+if [ "$UPGRADE_MODE" == "true" ] && [ -s "${INSTALL_DIR}/core/cert.pem" ] && [ -s "${INSTALL_DIR}/core/key.pem" ]; then
+    OLD_CERT_MOD=$(openssl x509 -noout -modulus -in "${INSTALL_DIR}/core/cert.pem" 2>/dev/null)
+    OLD_KEY_MOD=$(openssl rsa -noout -modulus -in "${INSTALL_DIR}/core/key.pem" 2>/dev/null)
+    if [ -n "$OLD_CERT_MOD" ] && [ "$OLD_CERT_MOD" = "$OLD_KEY_MOD" ]; then
+        if cp -p "${INSTALL_DIR}/core/cert.pem" "${INSTALL_DIR}/core/key.pem" "$TMP_CORE/" 2>/dev/null; then
+            echo "🔐 TLS 身份校验通过，本次 OTA 保留原证书指纹。"
+        else
+            rm -f "${TMP_CORE}/cert.pem"
+            rm -f "${TMP_CORE}/key.pem"
+            echo "⚠️ TLS 身份继承失败，将由新守护进程安全重建。"
+        fi
+    else
+        echo "⚠️ 现有 TLS 证书与私钥无效或不匹配，将由新守护进程安全重建。"
+    fi
 fi
 
 echo "⏳ 五个核心模块已全部通过哈希校验，正在抹杀旧版守护进程..."

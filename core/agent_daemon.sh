@@ -252,7 +252,7 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
         # 到达此处必已通过 HMAC 中间件 (合法 PSK 签名); 回显 PSK+NODE 摘要供
         # Master 核对——伪造响应需持有 PSK, 转发型 MITM 只能转述真 Agent 应答
         # (其危害上限为可见性, 无法伪造破坏性指令)。用于证书指纹变化时判别
-        # 合法轮换 (OTA 重铸证书) vs MITM。
+        # 合法轮换 (旧版迁移/证书更新) vs MITM。
         elif req_path == '/challenge':
             import hashlib as _ha
             _psk = AUTH_TOKEN
@@ -450,10 +450,6 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
                 tg_url = config_mem.get('TG_API_URL', '')
                 chat_id = config_mem.get('CHAT_ID', '')
 
-                # [Safe OTA] 版本守卫的跳过回报 (已是最新时回执, 静默跳过会让按钮无反馈)
-                skip_msg = f"ℹ️ **OTA 跳过**\n📍 节点: `{config_mem.get('NODE_ALIAS', '未知')}`\n当前 `v{config_mem.get('AGENT_VERSION', '?')}` 已 ≥ 远端版本，无需升级。"
-                skip_msg_b64 = base64.b64encode(skip_msg.encode('utf-8')).decode('utf-8')
-
                 # 将升级逻辑进行 Base64 深层封装，免疫 Popen 或 Systemd 传递带来的指令注入风险
                 # [Safe OTA] 版本守卫 (远端不比本地新即跳过并回执) + tag 锚定
                 # (发布规范: agent 通道 tag = v${VER}-agent, master 通道仍为 v${VER}-fork;
@@ -481,7 +477,8 @@ cleanup_ota_tmp() {{
     fi
 }}
 trap cleanup_ota_tmp EXIT
-if ! REMOTE_VERSION_CONTENT=$(curl -fsSL --connect-timeout 10 --retry 2 {repo_url}/version.txt); then
+REMOTE_VERSION_URL="{repo_url}/version.txt?t=$(date +%s)"
+if ! REMOTE_VERSION_CONTENT=$(curl -fsSL --connect-timeout 10 --retry 2 "$REMOTE_VERSION_URL"); then
     notify_abort "无法下载远端 version.txt。"
     exit 1
 fi
@@ -491,7 +488,8 @@ if [ -z "$REMOTE_VER" ]; then
     exit 1
 fi
 if ! ver_lt "$LOCAL_VER" "$REMOTE_VER"; then
-    MSG=$(echo '{skip_msg_b64}' | base64 -d)
+    NODE_ALIAS=$(printf '%s' '{node_alias_b64}' | base64 -d)
+    MSG=$(printf 'ℹ️ **OTA 跳过**\n📍 节点: `%s`\n当前 `v%s` · 远端 `v%s`，无需升级。' "$NODE_ALIAS" "$LOCAL_VER" "$REMOTE_VER")
     curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" -d "text=$MSG" -d "parse_mode=Markdown" > /dev/null 2>&1
     echo "OTA Skip: local ($LOCAL_VER) >= remote ($REMOTE_VER)" > "$LOG"
     exit 0
