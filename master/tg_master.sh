@@ -704,12 +704,14 @@ while true; do
                     TAG_URL=$(tag_raw_url "$REMOTE_VER")
                     MASTER_OTA_SCRIPT=$(mktemp "${MASTER_DIR}/ota_install.XXXXXX.sh")
                     MANIFEST_TMP=$(mktemp "${MASTER_DIR}/ota_manifest.XXXXXX")
-                    curl -fsSL --connect-timeout 10 --retry 2 "${TAG_URL}/MANIFEST.sha256" -o "$MANIFEST_TMP" || MANIFEST_TMP=""
-                    curl -fsSL --connect-timeout 10 --retry 2 "${TAG_URL}/master/install_master.sh" -o "$MASTER_OTA_SCRIPT" || MASTER_OTA_SCRIPT=""
+                    # [回收] 不再 `|| VAR=""`: 置空后下方 rm -f "$VAR" 是空操作, 而 curl
+                    # 失败仍会留下 0 字节文件 → 每次熔断漏一个。变量保留路径, 判空改看文件
+                    curl -fsSL --connect-timeout 10 --retry 2 "${TAG_URL}/MANIFEST.sha256" -o "$MANIFEST_TMP"
+                    curl -fsSL --connect-timeout 10 --retry 2 "${TAG_URL}/master/install_master.sh" -o "$MASTER_OTA_SCRIPT"
 
                     EXPECTED=$(awk '$2 == "master/install_master.sh" {print $1}' "$MANIFEST_TMP" 2>/dev/null)
                     ACTUAL=$(sha256sum "$MASTER_OTA_SCRIPT" 2>/dev/null | awk '{print $1}')
-                    if [ -z "$MANIFEST_TMP" ] || [ ! -s "$MASTER_OTA_SCRIPT" ] || [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$MASTER_OTA_SCRIPT" >/dev/null 2>&1; then
+                    if [ ! -s "$MANIFEST_TMP" ] || [ ! -s "$MASTER_OTA_SCRIPT" ] || [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$MASTER_OTA_SCRIPT" >/dev/null 2>&1; then
                         send_msg "$CHAT_ID" "❌ **OTA 熔断告警**%0A⚠️ 原因: tag \`v${REMOTE_VER}-fork\` 下载内容与 MANIFEST 锁定哈希不符或校验链不完整。%0A🚀 状态: 中枢升级已取消，安全。"
                         rm -f "$MASTER_OTA_SCRIPT" "$MANIFEST_TMP"
                         continue
