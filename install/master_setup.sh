@@ -232,6 +232,18 @@ do_master_deploy_core() {
         exit 1
     fi
 
+    # [供应链门禁] 与 build_master.sh 同构的锁定哈希校验。此前本步仅查非空,
+    # 而 tg_master.sh 是 root 常驻、持有 TG 令牌与 PSK 的最高权限产物 ——
+    # 它是安装链上唯一没有哈希保护的落地文件。清单缺失/条目缺失同样熔断。
+    EXPECTED=$(awk '$2 == "master/tg_master.sh" {print $1}' "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null)
+    ACTUAL=$(sha256sum "$TMP_MASTER" | awk '{print $1}')
+    if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+        echo -e "\033[31m❌ 供应链熔断：中枢核心哈希与 MANIFEST.sha256 不符 (或清单缺失)。已拒绝执行。\033[0m"
+        echo "🛡️ 防砖机制触发：已中止覆盖，旧版司令部仍在安全运行中。"
+        rm -f "$TMP_MASTER"
+        exit 1
+    fi
+
     echo "⏳ 新引擎校验通过，正在抹杀旧版守护进程..."
     if is_systemd; then
         systemctl kill --signal=SIGKILL ip-sentinel-master.service >/dev/null 2>&1 || true

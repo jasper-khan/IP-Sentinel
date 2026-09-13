@@ -105,13 +105,38 @@ do_engine_setup() {
     chmod 600 "${MASTER_DIR}/tunnel_key"
 
     # ---------- 3. 引擎文件 ----------
+    # [完整性门禁] 四个引擎文件属同一版产物, 按"整组"原子落位:
+    #   全部下载 → 逐个对 MANIFEST 校验 → 全数通过才统一 mv 进 engine/。
+    #   任一失败即熔断并清空暂存 —— 绝不落成"新调度器 + 旧浏览器引擎"的混版状态。
+    #   (范式同下方时区表: 退出条件是"哈希对上了"而非"拿到了文件";
+    #    这四个是 root 运行的引擎本体, 拉取失败/哈希不符/清单缺条目均熔断)
     mkdir -p "${MASTER_DIR}/engine" "${MASTER_DIR}/data" "${MASTER_DIR}/profiles" "${MASTER_DIR}/logs"
-    for f in camoufox_session.py tunnel_manager.sh scheduler.sh tg_digest.sh; do
-        curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/master/engine/${f}?t=$(date +%s)" \
-            -o "${MASTER_DIR}/engine/${f}" || {
-            echo -e "\033[33m⚠️ 引擎文件 ${f} 拉取失败。\033[0m"
-        }
+    ENG_FILES="camoufox_session.py tunnel_manager.sh scheduler.sh tg_digest.sh"
+    ENG_STAGE=$(mktemp -d "${MASTER_DIR}/.engine_stage.XXXXXX")
+    for f in $ENG_FILES; do
+        ENG_EXPECTED=$(awk -v t="master/engine/${f}" '$2 == t {print $1}' "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null)
+        ENG_OK=""
+        for _i in 1 2 3 4 5; do
+            if curl -fsSL --connect-timeout 10 "${REPO_RAW_URL}/master/engine/${f}?t=$(date +%s)" -o "${ENG_STAGE}/${f}" 2>/dev/null; then
+                if [ -n "$ENG_EXPECTED" ] && [ "$(sha256sum "${ENG_STAGE}/${f}" | awk '{print $1}')" = "$ENG_EXPECTED" ]; then
+                    ENG_OK="1"; break          # 哈希一致 = 重试的唯一退出条件
+                fi
+            fi
+            sleep 2
+        done
+        if [ -z "$ENG_OK" ]; then
+            for _c in $ENG_FILES; do rm -f "${ENG_STAGE}/${_c}"; done
+            rmdir "$ENG_STAGE" 2>/dev/null
+            echo -e "\033[31m❌ 供应链熔断：引擎文件 ${f} 拉取失败, 或哈希与 MANIFEST 不符 (含清单缺条目)。\033[0m"
+            echo "🛡️ 防砖机制触发：已中止安装；engine/ 目录保持原样, 未被覆写。"
+            exit 1
+        fi
     done
+    for f in $ENG_FILES; do
+        mv -f "${ENG_STAGE}/${f}" "${MASTER_DIR}/engine/${f}"
+        echo "✅ 引擎文件已校验落位: ${f}"
+    done
+    rmdir "$ENG_STAGE" 2>/dev/null
     chmod +x "${MASTER_DIR}/engine/tunnel_manager.sh" "${MASTER_DIR}/engine/scheduler.sh" "${MASTER_DIR}/engine/tg_digest.sh" 2>/dev/null
 
     # ---------- 4. 引擎数据 ----------
