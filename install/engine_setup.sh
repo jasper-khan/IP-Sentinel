@@ -19,6 +19,71 @@
 
 CAMOUFOX_PIN="0.5.6"
 CAMOUFOX_BROWSER_EXPECTED="152.0.4-beta.30"
+ENG_FILES="camoufox_session.py tunnel_manager.sh scheduler.sh tg_digest.sh"
+
+do_engine_stage_files() {
+    if [ -z "${SECURE_TMP:-}" ] || [ -z "${REPO_RAW_URL:-}" ]; then
+        echo -e "\033[31m❌ 引擎暂存环境未准备好。\033[0m"
+        return 1
+    fi
+
+    ENG_STAGE=$(mktemp -d "${SECURE_TMP}/engine_stage.XXXXXX") || {
+        echo -e "\033[31m❌ 无法创建引擎暂存目录。\033[0m"
+        return 1
+    }
+    for f in $ENG_FILES; do
+        ENG_EXPECTED=$(awk -v t="master/engine/${f}" '$2 == t {print $1}' "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null)
+        ENG_OK=""
+        for _i in 1 2 3 4 5; do
+            rm -f "${ENG_STAGE}/${f}"
+            if curl -fsSL --connect-timeout 10 "${REPO_RAW_URL}/master/engine/${f}?t=$(date +%s)" -o "${ENG_STAGE}/${f}" 2>/dev/null && \
+               [ -s "${ENG_STAGE}/${f}" ] && [ -n "$ENG_EXPECTED" ] && \
+               [ "$(sha256sum "${ENG_STAGE}/${f}" | awk '{print $1}')" = "$ENG_EXPECTED" ]; then
+                ENG_OK="1"
+                break
+            fi
+            sleep 2
+        done
+        if [ -z "$ENG_OK" ]; then
+            for _c in $ENG_FILES; do rm -f "${ENG_STAGE}/${_c}"; done
+            rmdir "$ENG_STAGE" 2>/dev/null
+            echo -e "\033[31m❌ 供应链熔断：引擎文件 ${f} 拉取失败，或哈希与 MANIFEST 不符。\033[0m"
+            return 1
+        fi
+    done
+    ENGINE_STAGE_READY="true"
+}
+
+do_engine_deploy_staged_files() {
+    if [ "${ENGINE_STAGE_READY:-false}" != "true" ]; then
+        echo -e "\033[31m❌ 引擎文件未完成预下载，拒绝落位。\033[0m"
+        return 1
+    fi
+
+    mkdir -p "${MASTER_DIR}/engine" "${MASTER_DIR}/data" "${MASTER_DIR}/profiles" "${MASTER_DIR}/logs" || return 1
+    MASTER_ROLLBACK_DIR="${MASTER_ROLLBACK_DIR:-${SECURE_TMP}/master_rollback}"
+    mkdir -p "$MASTER_ROLLBACK_DIR" || return 1
+
+    for f in $ENG_FILES; do
+        if [ -f "${MASTER_DIR}/engine/${f}" ]; then
+            cp -p "${MASTER_DIR}/engine/${f}" "${MASTER_ROLLBACK_DIR}/engine_${f}" || return 1
+        else
+            : > "${MASTER_ROLLBACK_DIR}/engine_${f}.missing" || return 1
+        fi
+    done
+    for f in $ENG_FILES; do
+        if ! mv -f "${ENG_STAGE}/${f}" "${MASTER_DIR}/engine/${f}" || [ ! -s "${MASTER_DIR}/engine/${f}" ]; then
+            echo -e "\033[31m❌ 引擎文件 ${f} 落位失败。\033[0m"
+            return 1
+        fi
+        echo "✅ 引擎文件已校验落位: ${f}"
+    done
+    rmdir "$ENG_STAGE" 2>/dev/null
+    if ! chmod +x "${MASTER_DIR}/engine/tunnel_manager.sh" "${MASTER_DIR}/engine/scheduler.sh" "${MASTER_DIR}/engine/tg_digest.sh"; then
+        echo -e "\033[31m❌ 引擎文件权限设置失败。\033[0m"
+        return 1
+    fi
+}
 
 do_engine_setup() {
     echo -e "\n[5/5] 正在部署浏览器养护引擎 (Camoufox) ..."
@@ -38,24 +103,39 @@ do_engine_setup() {
     fi
 
     # ---------- 1. venv + Camoufox ----------
-    if [ ! -x "${MASTER_DIR}/venv/bin/python3" ]; then
+    VENV_EXISTED="false"
+    if [ -x "${MASTER_DIR}/venv/bin/python3" ]; then
+        VENV_EXISTED="true"
+    else
         echo "🐍 正在创建 Python 虚拟环境 (venv)..."
-        python3 -m venv "${MASTER_DIR}/venv" || {
-            echo -e "\033[31m❌ venv 创建失败 (缺 python3-venv?)，引擎未安装，Master 其余功能不受影响。\033[0m"
-            return 0
-        }
+        if ! python3 -m venv "${MASTER_DIR}/venv"; then
+            echo -e "\033[31m❌ venv 创建失败 (缺 python3-venv?)，引擎未部署。\033[0m"
+            return 1
+        fi
     fi
 
-    echo "📦 正在安装/校验 Camoufox (首次较慢)..."
-    "${MASTER_DIR}/venv/bin/pip" install --quiet --disable-pip-version-check \
-        "camoufox[geoip]==${CAMOUFOX_PIN}" >/dev/null 2>&1 || {
-        echo -e "\033[33m⚠️ camoufox pip 安装失败，引擎未部署 (网络?)。可稍后重跑安装修复。\033[0m"
-        return 0
-    }
+    if [ "$VENV_EXISTED" = "true" ] && [ "$UPGRADE_MODE" = "true" ]; then
+        echo "🐍 检测到现有工作 venv，OTA 升级复用，不重建或追加依赖。"
+        if ! "${MASTER_DIR}/venv/bin/python3" -c "import camoufox" >/dev/null 2>&1; then
+            echo -e "\033[31m❌ 现有 venv 中 Camoufox 不可用，引擎升级中止。\033[0m"
+            return 1
+        fi
+    else
+        if [ ! -x "${MASTER_DIR}/venv/bin/pip" ]; then
+            echo -e "\033[31m❌ venv 的 pip 不可用，引擎未部署。\033[0m"
+            return 1
+        fi
+        echo "📦 正在安装/校验 Camoufox (首次较慢)..."
+        if ! "${MASTER_DIR}/venv/bin/pip" install --quiet --disable-pip-version-check \
+            "camoufox[geoip]==${CAMOUFOX_PIN}" >/dev/null 2>&1; then
+            echo -e "\033[31m❌ camoufox pip 安装失败，引擎升级中止。\033[0m"
+            return 1
+        fi
 
-    if ! "${MASTER_DIR}/venv/bin/python3" -c "import camoufox" >/dev/null 2>&1; then
-        echo -e "\033[33m⚠️ camoufox 模块不可用，引擎未部署。\033[0m"
-        return 0
+        if ! "${MASTER_DIR}/venv/bin/python3" -c "import camoufox" >/dev/null 2>&1; then
+            echo -e "\033[31m❌ camoufox 模块不可用，引擎未部署。\033[0m"
+            return 1
+        fi
     fi
 
     # 浏览器本体 (缺失时拉取;已存在跳过)
@@ -65,10 +145,10 @@ do_engine_setup() {
         "from camoufox.pkgman import installed_verstr; print(installed_verstr())" 2>/dev/null || true)
     if [ -z "$BROWSER_VER" ]; then
         echo "🦊 正在拉取 Camoufox 浏览器本体 (~150MB, 首次较慢)..."
-        "${MASTER_DIR}/venv/bin/python3" -m \
-            camoufox fetch >/dev/null 2>&1 || {
-            echo -e "\033[33m⚠️ 浏览器本体拉取失败，可稍后手动执行: ${MASTER_DIR}/venv/bin/python3 -m camoufox fetch\033[0m"
-        }
+        if ! "${MASTER_DIR}/venv/bin/python3" -m camoufox fetch >/dev/null 2>&1; then
+            echo -e "\033[31m❌ 浏览器本体拉取失败，引擎升级中止。\033[0m"
+            return 1
+        fi
         BROWSER_VER=$("${MASTER_DIR}/venv/bin/python3" -c \
             "from camoufox.pkgman import installed_verstr; print(installed_verstr())" 2>/dev/null || true)
     fi
@@ -76,6 +156,7 @@ do_engine_setup() {
     # [版本锁定] 构建号须等于已知良好版本; 不符告警不阻断 (会话多半仍可跑)
     if [ -z "$BROWSER_VER" ]; then
         echo -e "\033[31m❌ 浏览器本体不可用 (installed_verstr 无输出)，引擎无法养护。\033[0m"
+        return 1
     elif [ "$BROWSER_VER" != "${CAMOUFOX_BROWSER_EXPECTED}" ]; then
         echo -e "\033[33m⚠️ 浏览器构建与锁定版本不符: 实际 ${BROWSER_VER}, 锁定 ${CAMOUFOX_BROWSER_EXPECTED}\033[0m"
         echo -e "\033[33m   时区伪装由二进制层实现, 构建变更可能改变养护效果, 请跑一轮养护自检确认后再放行。\033[0m"
@@ -110,34 +191,9 @@ do_engine_setup() {
     #   任一失败即熔断并清空暂存 —— 绝不落成"新调度器 + 旧浏览器引擎"的混版状态。
     #   (范式同下方时区表: 退出条件是"哈希对上了"而非"拿到了文件";
     #    这四个是 root 运行的引擎本体, 拉取失败/哈希不符/清单缺条目均熔断)
-    mkdir -p "${MASTER_DIR}/engine" "${MASTER_DIR}/data" "${MASTER_DIR}/profiles" "${MASTER_DIR}/logs"
-    ENG_FILES="camoufox_session.py tunnel_manager.sh scheduler.sh tg_digest.sh"
-    ENG_STAGE=$(mktemp -d "${MASTER_DIR}/.engine_stage.XXXXXX")
-    for f in $ENG_FILES; do
-        ENG_EXPECTED=$(awk -v t="master/engine/${f}" '$2 == t {print $1}' "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null)
-        ENG_OK=""
-        for _i in 1 2 3 4 5; do
-            if curl -fsSL --connect-timeout 10 "${REPO_RAW_URL}/master/engine/${f}?t=$(date +%s)" -o "${ENG_STAGE}/${f}" 2>/dev/null; then
-                if [ -n "$ENG_EXPECTED" ] && [ "$(sha256sum "${ENG_STAGE}/${f}" | awk '{print $1}')" = "$ENG_EXPECTED" ]; then
-                    ENG_OK="1"; break          # 哈希一致 = 重试的唯一退出条件
-                fi
-            fi
-            sleep 2
-        done
-        if [ -z "$ENG_OK" ]; then
-            for _c in $ENG_FILES; do rm -f "${ENG_STAGE}/${_c}"; done
-            rmdir "$ENG_STAGE" 2>/dev/null
-            echo -e "\033[31m❌ 供应链熔断：引擎文件 ${f} 拉取失败, 或哈希与 MANIFEST 不符 (含清单缺条目)。\033[0m"
-            echo "🛡️ 防砖机制触发：已中止安装；engine/ 目录保持原样, 未被覆写。"
-            exit 1
-        fi
-    done
-    for f in $ENG_FILES; do
-        mv -f "${ENG_STAGE}/${f}" "${MASTER_DIR}/engine/${f}"
-        echo "✅ 引擎文件已校验落位: ${f}"
-    done
-    rmdir "$ENG_STAGE" 2>/dev/null
-    chmod +x "${MASTER_DIR}/engine/tunnel_manager.sh" "${MASTER_DIR}/engine/scheduler.sh" "${MASTER_DIR}/engine/tg_digest.sh" 2>/dev/null
+    if ! do_engine_deploy_staged_files; then
+        return 1
+    fi
 
     # ---------- 4. 引擎数据 ----------
     # 时区表 (persona 用); 区域模板/关键词/坐标由注册报文携带 + 调度器按需拉取,
@@ -243,15 +299,29 @@ Unit=ip-sentinel-digest.service
 WantedBy=timers.target
 EOF
 
-        systemctl daemon-reload
-        systemctl enable --now ip-sentinel-tunnels.service >/dev/null 2>&1
-        systemctl enable --now ip-sentinel-engine.service >/dev/null 2>&1
-        systemctl enable --now ip-sentinel-digest.timer >/dev/null 2>&1
-        systemctl restart ip-sentinel-tunnels.service >/dev/null 2>&1
-        systemctl restart ip-sentinel-engine.service >/dev/null 2>&1
+        if ! systemctl daemon-reload || \
+           ! systemctl enable --now ip-sentinel-tunnels.service >/dev/null 2>&1 || \
+           ! systemctl enable --now ip-sentinel-engine.service >/dev/null 2>&1 || \
+           ! systemctl enable --now ip-sentinel-digest.timer >/dev/null 2>&1 || \
+           ! systemctl restart ip-sentinel-tunnels.service >/dev/null 2>&1 || \
+           ! systemctl restart ip-sentinel-engine.service >/dev/null 2>&1 || \
+           ! systemctl is-active --quiet ip-sentinel-tunnels.service || \
+           ! systemctl is-active --quiet ip-sentinel-engine.service || \
+           ! systemctl is-active --quiet ip-sentinel-digest.timer; then
+            echo -e "\033[31m❌ 引擎守护服务启动检查失败。\033[0m"
+            return 1
+        fi
     else
-        pgrep -f tunnel_manager.sh >/dev/null || nohup bash "${MASTER_DIR}/engine/tunnel_manager.sh" >/dev/null 2>&1 &
-        pgrep -f "engine/scheduler.sh" >/dev/null || nohup bash "${MASTER_DIR}/engine/scheduler.sh" >/dev/null 2>&1 &
+        if ! pgrep -f tunnel_manager.sh >/dev/null 2>&1; then
+            nohup bash "${MASTER_DIR}/engine/tunnel_manager.sh" >/dev/null 2>&1 &
+        fi
+        if ! pgrep -f "engine/scheduler.sh" >/dev/null 2>&1; then
+            nohup bash "${MASTER_DIR}/engine/scheduler.sh" >/dev/null 2>&1 &
+        fi
+        if ! pgrep -f tunnel_manager.sh >/dev/null 2>&1 || ! pgrep -f "engine/scheduler.sh" >/dev/null 2>&1; then
+            echo -e "\033[31m❌ 引擎守护进程启动检查失败。\033[0m"
+            return 1
+        fi
     fi
 
     # ---------- 6. 汇报 ----------

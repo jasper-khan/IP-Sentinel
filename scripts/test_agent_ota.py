@@ -53,15 +53,18 @@ class AgentOTA(unittest.TestCase):
     def test_ota_paths(self):
         ota = render_ota()
         scenarios = (
-            "version_failure", "manifest_failure", "manifest_empty",
+            "version_failure", "invalid_version", "manifest_failure", "manifest_empty",
             "installer_failure", "hash_mismatch", "syntax_failure",
-            "mktemp_first", "mktemp_second", "notify_failure", "skip", "success",
+            "mktemp_first", "mktemp_second", "notify_failure", "skip", "install_failure", "success",
         )
         for scenario in scenarios:
             with self.subTest(scenario=scenario):
                 directory = Path(tempfile.mkdtemp(prefix="ips-ota-test-"))
                 location = shell_path(directory)
-                installer = "#!/bin/bash\nprintf installed > " + shlex.quote(location + "/installed") + "\n"
+                installer = ('#!/bin/bash\n[ "$OTA_TARGET_VERSION" = "5.6.30" ] || exit 8\n'
+                             + "printf installed > " + shlex.quote(location + "/installed") + "\n")
+                if scenario == "install_failure":
+                    installer = "#!/bin/bash\necho TEST_INSTALL_FAILED\nexit 7\n"
                 if scenario == "syntax_failure":
                     installer = "#!/bin/bash\nif then\n"
                 expected = hashlib.sha256(installer.encode()).hexdigest()
@@ -89,12 +92,14 @@ curl() {
             https://*) url="$arg" ;;
         esac
     done
-    case "$url" in
+    printf '%s\n' "$url" >> "$TEST_DIR/requests"
+    case "${url%%\?*}" in
         https://notify.invalid)
             log_notification "$request"
             [ "$SCENARIO" != notify_failure ]; return ;;
         */version.txt)
             [ "$SCENARIO" = version_failure ] && return 22
+            [ "$SCENARIO" = invalid_version ] && { echo AGENT_VERSION=invalid; return; }
             if [ "$SCENARIO" = skip ]; then echo AGENT_VERSION=5.6.29
             else echo AGENT_VERSION=5.6.30; fi ;;
         */MANIFEST.sha256)
@@ -116,8 +121,8 @@ curl() {
                 script = script.replace("/opt/ip_sentinel/logs/ota_upgrade.log", location + "/ota.log")
                 script = script.replace("/opt/ip_sentinel/config.conf", location + "/config.conf")
                 try:
-                    result = subprocess.run([BASH, "-c", script], capture_output=True,
-                                            text=True, timeout=15)
+                    result = subprocess.run([BASH], input=script, capture_output=True,
+                                            text=True, encoding="utf-8", timeout=15)
                     self.assertFalse((directory / "installer.tmp").exists(), result.stderr)
                     self.assertFalse((directory / "manifest.tmp").exists(), result.stderr)
                     self.assertEqual((directory / "installed").exists(), scenario == "success", result.stderr)
@@ -128,6 +133,30 @@ curl() {
                         self.assertEqual(result.returncode, 0, result.stderr)
                     else:
                         self.assertNotEqual(result.returncode, 0, result.stderr)
+                    requests = (directory / "requests").read_text(encoding="utf-8")
+                    self.assertNotIn("Unexpected network request", result.stderr)
+                    if scenario not in ("version_failure", "invalid_version", "skip", "mktemp_first", "mktemp_second"):
+                        self.assertIn("/v5.6.30-agent/MANIFEST.sha256", requests)
+                    reasons = {
+                        "version_failure": "无法下载远端 version.txt",
+                        "invalid_version": "缺少有效的 AGENT_VERSION",
+                        "manifest_failure": "无法下载有效清单",
+                        "manifest_empty": "无法下载有效清单",
+                        "notify_failure": "无法下载有效清单",
+                        "installer_failure": "无法下载安装脚本",
+                        "hash_mismatch": "MANIFEST 哈希不符",
+                        "syntax_failure": "脚本语法校验未通过",
+                        "mktemp_first": "无法创建安装脚本临时文件",
+                        "mktemp_second": "无法创建清单临时文件",
+                        "install_failure": "TEST_INSTALL_FAILED",
+                        "skip": "OTA Skip",
+                    }
+                    if scenario in reasons:
+                        self.assertIn(reasons[scenario], (directory / "ota.log").read_text(encoding="utf-8"))
+                    if scenario == "install_failure":
+                        notification = (directory / "notifications").read_text(encoding="utf-8")
+                        self.assertIn("test-node", notification)
+                        self.assertIn("5.6.30", notification)
                     print("PASS", scenario)
                 finally:
                     # Only known fixtures created by this test; no recursive cleanup.
@@ -138,6 +167,7 @@ curl() {
                     (directory / "installed").unlink(missing_ok=True)
                     (directory / "notifications").unlink(missing_ok=True)
                     (directory / "ota.log").unlink(missing_ok=True)
+                    (directory / "requests").unlink(missing_ok=True)
                     directory.rmdir()
 
 

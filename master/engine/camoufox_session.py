@@ -479,6 +479,7 @@ EXPECTED_DOMAINS = {
     "TW": ("www.google.com.tw", "google.com.tw"),
     "JP": ("www.google.co.jp", "google.co.jp"),
     "UK": ("www.google.co.uk", "google.co.uk"),
+    "AU": ("www.google.com.au", "google.com.au"),
 }
 # 域名 → 国家码 (展示用反查; 未知域名原样保留)
 _DOMAIN_GL = {d: cc for cc, ds in EXPECTED_DOMAINS.items() for d in ds}
@@ -545,6 +546,8 @@ def region_verdict(node, region_code, probe):
     最新快照仍写 <node>.region (日报消费)。
     """
     target = region_code.upper()
+    if target == "GB":
+        target = "UK"
     jump = (probe.get("jump") or "").lower()
     prem = (probe.get("prem") or "").upper()
     music = (probe.get("music") or "").upper()
@@ -568,7 +571,7 @@ def region_verdict(node, region_code, probe):
             sigs.append((name, "fail", "?"))
         elif val == "CN" and target != "CN":
             sigs.append((name, "cn", val))
-        elif val == target:
+        elif val == target or (target == "UK" and val == "GB"):
             sigs.append((name, "support", val))
         else:
             sigs.append((name, "drift", val))

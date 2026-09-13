@@ -7,11 +7,10 @@
 cleanup_and_exit() {
     echo -e "\n\n\033[33m⚠️ 检测到中断信号 (Ctrl+C)，安装操作已被手动中止。\033[0m"
     echo -e "🧹 正在清理临时沙盒文件..."
-    rm -rf "$SECURE_TMP" 2>/dev/null
     exit 1
 }
 trap cleanup_and_exit INT QUIT TERM
-trap 'rm -rf "$SECURE_TMP" 2>/dev/null' EXIT HUP
+trap 'if [ -f "${SECURE_TMP}/MASTER_ROLLBACK_REQUIRED" ]; then echo "⚠️ 回滚备份已保留: ${SECURE_TMP}"; else rm -rf "$SECURE_TMP" 2>/dev/null; fi' EXIT HUP
 
 if [ "$EUID" -ne 0 ]; then
   echo -e "\033[31m❌ 权限被拒绝: 部署 IP-Sentinel 需要最高系统权限。\033[0m"
@@ -20,7 +19,8 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 SECURE_TMP=$(mktemp -d /tmp/ips_master_install.XXXXXX)
-REPO_RAW_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
+REPO_MAIN_URL="https://raw.githubusercontent.com/jasper-khan/IP-Sentinel/main"
+REPO_RAW_URL="$REPO_MAIN_URL"
 
 # ----------------------------------------------------------
 # [可用性] CDN 间歇 404 重试函数
@@ -37,10 +37,20 @@ fetch_retry() {
 }
 
 # ----------------------------------------------------------
-# [核心架构升级] 动态嗅探云端真理之源 (SSOT)
+# [版本锁定] OTA 调用方传入的版本优先; 兼容旧调用方时只从 main
+# 确定一次版本, 随即将所有后续下载固定到对应 fork tag。
 # ----------------------------------------------------------
-TARGET_VERSION=$( (curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)" || curl -4 -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)") 2>/dev/null | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
-TARGET_VERSION=${TARGET_VERSION:-"4.3.1"}
+TARGET_VERSION="${OTA_TARGET_VERSION:-}"
+if [ -z "$TARGET_VERSION" ]; then
+    TARGET_VERSION=$( (curl -fsSL --connect-timeout 5 --retry 2 "${REPO_MAIN_URL}/version.txt?t=$(date +%s)" || curl -4 -fsSL --connect-timeout 5 --retry 2 "${REPO_MAIN_URL}/version.txt?t=$(date +%s)") 2>/dev/null | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+fi
+
+if ! [[ "$TARGET_VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+    echo -e "\033[31m❌ 无法确定有效 Master 版本，安装已取消。\033[0m"
+    exit 1
+fi
+
+REPO_RAW_URL="${REPO_MAIN_URL%/main}/v${TARGET_VERSION}-fork"
 
 echo -e "\n⏳ 正在拉取 IP-Sentinel Master v${TARGET_VERSION} 安装引擎..."
 
@@ -74,6 +84,7 @@ fi
 export SECURE_TMP
 export REPO_RAW_URL
 export TARGET_VERSION
+export OTA_TARGET_VERSION="$TARGET_VERSION"
 
 chmod +x "${SECURE_TMP}/build_master.sh"
 bash "${SECURE_TMP}/build_master.sh"

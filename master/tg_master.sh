@@ -52,9 +52,15 @@ get_flag() {
 }
 
 send_ui() {
+    local body
+    body=$(jq -cn \
+        --arg chat_id "$1" \
+        --arg text "$2" \
+        --argjson inline_keyboard "$3" \
+        '{chat_id: $chat_id, text: ($text | gsub("\\\\n"; "\n")), parse_mode: "Markdown", reply_markup: {inline_keyboard: $inline_keyboard}}') || return
     curl -s --connect-timeout 5 -m 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "{\"chat_id\":\"$1\",\"text\":\"$2\",\"parse_mode\":\"Markdown\",\"reply_markup\":{\"inline_keyboard\":$3}}" > /dev/null
+        -d "$body" > /dev/null
 }
 
 send_msg() {
@@ -92,9 +98,15 @@ render_ui() {
     fi
     
     # 4. 无论如何，在最底部发送全新面板，并捕获最新 message_id 记录下来
+    local body
+    body=$(jq -cn \
+        --arg chat_id "$chat_id" \
+        --arg text "$text" \
+        --argjson inline_keyboard "$buttons" \
+        '{chat_id: $chat_id, text: ($text | gsub("\\\\n"; "\n")), parse_mode: "Markdown", reply_markup: {inline_keyboard: $inline_keyboard}}') || return
     local res=$(curl -s --connect-timeout 5 -m 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "{\"chat_id\":\"$chat_id\",\"text\":\"$text\",\"parse_mode\":\"Markdown\",\"reply_markup\":{\"inline_keyboard\":$buttons}}")
+        -d "$body")
     
     local new_id=$(echo "$res" | jq -r '.result.message_id // empty')
     if [ -n "$new_id" ] && [ "$new_id" != "null" ]; then
@@ -156,7 +168,7 @@ verify_agent_tls() {
     local v_node=$3
 
     local v_fp
-    v_fp=$(echo | openssl s_client -connect "${v_ip}:${v_port}" -servername "agent" 2>/dev/null \
+    v_fp=$(echo | timeout 8 openssl s_client -connect "${v_ip}:${v_port}" -servername "agent" 2>/dev/null \
         | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d'=' -f2 | tr -d ':')
     [ -z "$v_fp" ] && return 2
 
@@ -187,7 +199,7 @@ call_agent() {
     node_psk=$(db_exec "SELECT psk FROM nodes WHERE chat_id='${CHAT_ID}' AND node_name='${node_key}' LIMIT 1;" | head -n 1 | tr -d '[:space:]')
     if ! [[ "$node_psk" =~ ^[0-9a-fA-F]{64}$ ]]; then
         echo "FAILED_NO_PSK"
-        return
+        return 2
     fi
 
     local clean_ips=$(echo "$ips" | tr '_' ',')
@@ -214,7 +226,7 @@ call_agent() {
                 if [ "$ch_ack" = "PSK_ACK|${expect}" ]; then
                     # 节点证明持有 PSK → 视为合法证书轮换, 重锁新指纹后重发原指令
                     local new_fp
-                    new_fp=$(echo | openssl s_client -connect "${ip}:${port}" -servername "agent" 2>/dev/null                         | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d'=' -f2 | tr -d ':')
+                    new_fp=$(echo | timeout 8 openssl s_client -connect "${ip}:${port}" -servername "agent" 2>/dev/null                         | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d'=' -f2 | tr -d ':')
                     if [ -n "$new_fp" ]; then
                         db_exec "UPDATE nodes SET cert_fp='${new_fp}' WHERE chat_id='${CHAT_ID}' AND node_name='${node_key}';"
                         # PSK 已证明节点身份，属于可自愈审计事件；落本地日志，避免舰队 OTA 刷屏
@@ -225,7 +237,7 @@ call_agent() {
                 else
                     send_msg "$CHAT_ID" "🚨 **[安全告警] 节点 \`${node_key}\` (${ip}) 证书指纹与锁定值不符且 PSK 挑战验证失败！疑似中间人攻击，本次指令已中止。**"
                     echo "FAILED_TLS_MISMATCH"
-                    return
+                    return 3
                 fi
             fi
 
@@ -234,11 +246,19 @@ call_agent() {
 
             if [ "$res" != "FAILED" ] && [ -n "$res" ]; then
                 echo "$res"
-                return
+                if [[ "$res" == "Action Accepted: "* ]]; then
+                    return 0
+                fi
+                case "$res" in
+                    *401*) return 4 ;;
+                    *403*) return 5 ;;
+                    *) return 1 ;;
+                esac
             fi
         fi
     done
     echo "FAILED"
+    return 1
 }
 
 # ==========================================================
@@ -639,7 +659,7 @@ while true; do
                         echo "[$(date '+%H:%M:%S')] RC_STEP6 CALL $NNAME ($AIP:$APORT)" >> "${MASTER_DIR}/logs/reconfig_debug.log"
                         RESPONSE=$(call_agent "$NNAME" "$AIP" "$APORT" "/trigger_reconfig" "b64=${RECONFIG_B64}")
                         echo "[$(date '+%H:%M:%S')] RC_STEP7 RESP $NNAME => ${RESPONSE:0:80}" >> "${MASTER_DIR}/logs/reconfig_debug.log"
-                        if [[ "$RESPONSE" == *"Action Accepted"* ]]; then
+                        if [[ "$RESPONSE" == "Action Accepted: "* ]]; then
                             SUCCESS_COUNT=$((SUCCESS_COUNT+1))
                         else
                             FAIL_LIST="${FAIL_LIST}\`$NNAME\` (${AIP}) → ${RESPONSE}%0A"
@@ -659,15 +679,59 @@ while true; do
 
                 "all_ota_execute")
                     if [ -z "$CB_ID" ]; then send_msg "$CHAT_ID" "⛔ 安全拦截：非法特权执行环境。"; continue; fi
-                    NODE_DATA=$(db_exec "SELECT node_name, agent_ip, agent_port FROM nodes WHERE chat_id='$CHAT_ID' AND enable_ota='true';")
+                    NODE_DATA=$(db_exec "SELECT node_name, IFNULL(NULLIF(node_alias,''), node_name), agent_ip, agent_port FROM nodes WHERE chat_id='$CHAT_ID' AND enable_ota='true';")
                     if [ -z "$NODE_DATA" ]; then
                         render_msg "$CHAT_ID" "$MSG_ID" "⚠️ 您名下暂无开启 OTA 权限的记录节点。"
                     else
                         render_msg "$CHAT_ID" "$MSG_ID" "📢 **司令部指令下达：正在唤醒全舰队执行 OTA 升级...**%0A*(节点升级成功后会主动发回新的入库确认，请注意查收)*"
-                        echo "$NODE_DATA" | while IFS='|' read -r NNAME AIP APORT; do
-                            call_agent "$NNAME" "$AIP" "$APORT" "/trigger_ota" "" > /dev/null &
+                        OTA_PIDS=()
+                        OTA_NODE_ALIASES=()
+                        OTA_TOTAL=0
+                        while IFS='|' read -r NNAME NALIAS AIP APORT; do
+                            [ -z "$NNAME" ] && continue
+                            OTA_NODE_ALIASES+=("$NALIAS")
+                            call_agent "$NNAME" "$AIP" "$APORT" "/trigger_ota" "" > /dev/null 2>&1 &
+                            OTA_PIDS+=("$!")
+                            OTA_TOTAL=$((OTA_TOTAL + 1))
                             sleep 0.3
+                        done <<< "$NODE_DATA"
+
+                        OTA_ACCEPTED=0
+                        OTA_FAILURE_COUNT=0
+                        OTA_FAIL_LIST=""
+                        OTA_FAILURE_DISPLAY_LIMIT=20
+                        OTA_FAILURES_DISPLAYED=0
+                        for i in "${!OTA_PIDS[@]}"; do
+                            wait "${OTA_PIDS[$i]}"
+                            OTA_RC=$?
+                            if [ "$OTA_RC" -eq 0 ]; then
+                                OTA_ACCEPTED=$((OTA_ACCEPTED + 1))
+                                continue
+                            fi
+                            OTA_FAILURE_COUNT=$((OTA_FAILURE_COUNT + 1))
+                            case "$OTA_RC" in
+                                2) OTA_REASON="FAILED_NO_PSK" ;;
+                                3) OTA_REASON="FAILED_TLS_MISMATCH" ;;
+                                4) OTA_REASON="HTTP 401" ;;
+                                5) OTA_REASON="HTTP 403" ;;
+                                *) OTA_REASON="other failure" ;;
+                            esac
+                            if [ "$OTA_FAILURES_DISPLAYED" -lt "$OTA_FAILURE_DISPLAY_LIMIT" ]; then
+                                if [ -n "$OTA_FAIL_LIST" ]; then OTA_FAIL_LIST+="%0A"; fi
+                                OTA_FAIL_LIST+="• ${OTA_NODE_ALIASES[$i]}: ${OTA_REASON}"
+                                OTA_FAILURES_DISPLAYED=$((OTA_FAILURES_DISPLAYED + 1))
+                            fi
                         done
+
+                        OTA_SUMMARY="📋 **全舰队 OTA 指令派发汇总**%0A已接受: ${OTA_ACCEPTED}/${OTA_TOTAL} 台（仅表示节点收到指令，非升级完成；结果将由节点异步回传）"
+                        if [ "$OTA_FAILURE_COUNT" -gt 0 ]; then
+                            OTA_SUMMARY+="%0A失败: ${OTA_FAILURE_COUNT} 台"
+                            [ -n "$OTA_FAIL_LIST" ] && OTA_SUMMARY+="%0A❌ ${OTA_FAIL_LIST}"
+                            if [ "$OTA_FAILURE_COUNT" -gt "$OTA_FAILURE_DISPLAY_LIMIT" ]; then
+                                OTA_SUMMARY+="%0A（失败清单最多展示 ${OTA_FAILURE_DISPLAY_LIMIT} 台）"
+                            fi
+                        fi
+                        send_msg "$CHAT_ID" "$OTA_SUMMARY"
                     fi
                     ;;
 
@@ -687,8 +751,8 @@ while true; do
 
                     # [Safe OTA] 版本守卫: 远端不比本地新即拒绝 (防重装/降级)
                     REMOTE_VER=$(curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)" | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
-                    if [ -z "$REMOTE_VER" ]; then
-                        send_msg "$CHAT_ID" "❌ OTA 中止: 无法读取远端版本信息 (version.txt 不可达)，升级取消。"
+                    if ! [[ "$REMOTE_VER" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+                        send_msg "$CHAT_ID" "❌ OTA 中止: 远端版本信息无效或不可达 (需为 X.Y.Z)，升级取消。"
                         continue
                     fi
                     if ! version_lt "$MASTER_VERSION" "$REMOTE_VER"; then
@@ -723,10 +787,11 @@ while true; do
                     chmod 700 "$MASTER_OTA_SCRIPT"
 
                     if command -v systemd-run >/dev/null 2>&1; then
-                        systemd-run --quiet --no-block /bin/bash -c "export SILENT_MASTER_OTA='true'; export OTA_CHAT_ID='$CHAT_ID'; bash '$MASTER_OTA_SCRIPT'"
+                        systemd-run --quiet --no-block /bin/bash -c "export SILENT_MASTER_OTA='true'; export OTA_CHAT_ID='$CHAT_ID'; export OTA_TARGET_VERSION='$REMOTE_VER'; bash '$MASTER_OTA_SCRIPT'"
                     else
                         export SILENT_MASTER_OTA="true"
                         export OTA_CHAT_ID="$CHAT_ID"
+                        export OTA_TARGET_VERSION="$REMOTE_VER"
                         nohup bash "$MASTER_OTA_SCRIPT" >/dev/null 2>&1 & disown
                     fi
                     sleep 10
@@ -778,12 +843,18 @@ while true; do
                             
                             RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_quality" "")
                             
-                            if [ "$RESPONSE" == "FAILED" ]; then
-                                send_msg "$CHAT_ID" "❌ 指令下发超时或失败！请检查节点公网 IP 或防火墙端口 ($AGENT_PORT) 是否放行。"
-                            elif [[ "$RESPONSE" == *"403"* ]]; then
-                                send_msg "$CHAT_ID" "⚠️ **拒绝执行**：该节点未在本地开启此模块，请检查安装时的配置！"
-                            else
+                            if [[ "$RESPONSE" == "Action Accepted: "* ]]; then
                                 send_msg "$CHAT_ID" "✅ 节点 \`$TARGET_NODE\` 回应: 🔍 深海声呐已投放！请等待异步战报回传。"
+                            elif [[ "$RESPONSE" == *"FAILED_NO_PSK"* ]]; then
+                                send_msg "$CHAT_ID" "❌ [quality] 下发失败：节点缺少有效 PSK (FAILED_NO_PSK)。"
+                            elif [[ "$RESPONSE" == *"FAILED_TLS_MISMATCH"* ]]; then
+                                send_msg "$CHAT_ID" "❌ [quality] 下发失败：TLS 指纹/PSK 校验不匹配，已中止。"
+                            elif [[ "$RESPONSE" == *"401"* ]]; then
+                                send_msg "$CHAT_ID" "❌ [quality] 下发失败：节点返回 HTTP 401，认证被拒绝。"
+                            elif [[ "$RESPONSE" == *"403"* ]]; then
+                                send_msg "$CHAT_ID" "⚠️ **拒绝执行**：该节点未在本地开启此模块 (HTTP 403)。"
+                            else
+                                send_msg "$CHAT_ID" "❌ [quality] 下发失败：节点未返回预期成功响应；请检查节点公网 IP 或防火墙端口 ($AGENT_PORT) 是否放行。"
                             fi
                         else
                             render_msg "$CHAT_ID" "$MSG_ID" "❌ 数据库中未找到该节点的通讯地址。"
@@ -1050,6 +1121,17 @@ _💡 三核 = Jump(google落地) / Prem / Music(YouTube官方GL)。🔴送中 �
                 do_rename:*)
                     IFS=':' read -r CMD TARGET_NODE NEW_ALIAS <<< "$TEXT"
                     CHAT_ID=$(echo "$CHAT_ID" | tr -cd '0-9-')
+
+                    if ! [[ "$TARGET_NODE" =~ ^[a-zA-Z0-9_.-]{1,30}$ ]]; then
+                        send_msg "$CHAT_ID" "❌ 节点名称格式无效，已拒绝重命名请求。"
+                        continue
+                    fi
+                    NEW_ALIAS=$(jq -nr --arg alias "$NEW_ALIAS" \
+                        '$alias | gsub("_"; "-") | gsub("[^-a-zA-Z0-9\u4e00-\u9fa5]"; "") | .[0:20]') || NEW_ALIAS=""
+                    if [ -z "$NEW_ALIAS" ]; then
+                        send_msg "$CHAT_ID" "❌ 别名为空或不含允许字符，已拒绝重命名请求。"
+                        continue
+                    fi
                     
                     AGENT_INFO=$(db_exec "SELECT agent_ip, agent_port FROM nodes WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE' LIMIT 1;")
                     AGENT_IP=$(echo "$AGENT_INFO" | cut -d'|' -f1)
@@ -1063,7 +1145,7 @@ _💡 三核 = Jump(google落地) / Prem / Music(YouTube官方GL)。🔴送中 �
                         
                         if [ "$RESPONSE" == "FAILED" ]; then
                             send_msg "$CHAT_ID" "❌ 指令下发超时！为防范劫持风险，已终止请求。"
-                        elif [[ "$RESPONSE" == *"Action Accepted"* ]]; then
+                        elif [[ "$RESPONSE" == "Action Accepted: "* ]]; then
                             db_exec "UPDATE nodes SET node_alias='$NEW_ALIAS' WHERE chat_id='$CHAT_ID' AND node_name='$TARGET_NODE';"
                             send_msg "$CHAT_ID" "✅ 通讯成功！节点别名已下发: \`$NEW_ALIAS\`%0A*(司令部档案已自动刷新，雷达面板已同步)*"
                         else
@@ -1093,12 +1175,18 @@ _💡 三核 = Jump(google落地) / Prem / Music(YouTube官方GL)。🔴送中 �
                         
                         RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_ota" "")
                         
-                        if [ "$RESPONSE" == "FAILED" ]; then
-                            send_msg "$CHAT_ID" "❌ OTA 指令下发彻底失败！链路异常或严禁使用 HTTP 降级通讯。"
+                        if [[ "$RESPONSE" == "Action Accepted: "* ]]; then
+                            send_msg "$CHAT_ID" "✅ OTA (TLS加密) 指令已被节点接受，正在后台执行拉取重构（不代表升级已完成）。"
+                        elif [[ "$RESPONSE" == *"FAILED_NO_PSK"* ]]; then
+                            send_msg "$CHAT_ID" "❌ OTA 下发失败：节点缺少有效 PSK (FAILED_NO_PSK)。"
+                        elif [[ "$RESPONSE" == *"FAILED_TLS_MISMATCH"* ]]; then
+                            send_msg "$CHAT_ID" "❌ OTA 下发失败：TLS 指纹/PSK 校验不匹配，已中止。"
+                        elif [[ "$RESPONSE" == *"401"* ]]; then
+                            send_msg "$CHAT_ID" "❌ OTA 下发失败：节点返回 HTTP 401，认证被拒绝。"
                         elif [[ "$RESPONSE" == *"403"* ]]; then
-                            send_msg "$CHAT_ID" "⚠️ **节点拒绝执行**：该节点本地未开启 OTA 权限或运行在官方网关下！"
+                            send_msg "$CHAT_ID" "⚠️ **节点拒绝执行**：该节点本地未开启 OTA 权限或运行在官方网关下 (HTTP 403)。"
                         else
-                            send_msg "$CHAT_ID" "✅ OTA (TLS加密) 触发成功！节点正在后台执行拉取重构..."
+                            send_msg "$CHAT_ID" "❌ OTA 指令下发失败：节点未返回预期成功响应。"
                         fi
                     else
                         render_msg "$CHAT_ID" "$MSG_ID" "❌ 数据库中未找到该节点的通讯地址。"
@@ -1119,11 +1207,7 @@ _💡 三核 = Jump(google落地) / Prem / Music(YouTube官方GL)。🔴送中 �
                         
                         RESPONSE=$(call_agent "$TARGET_NODE" "$AGENT_IP" "$AGENT_PORT" "/trigger_${ACTION_TYPE}" "")
                         
-                        if [ "$RESPONSE" == "FAILED" ]; then
-                            send_msg "$CHAT_ID" "❌ 指令下发超时或失败！为保护链路安全，已终止通信 (严禁降级为 HTTP)。"
-                        elif [[ "$RESPONSE" == *"403"* ]]; then
-                            send_msg "$CHAT_ID" "⚠️ **拒绝执行**：该节点未在本地开启此模块，请检查安装时的配置！"
-                        else
+                        if [[ "$RESPONSE" == "Action Accepted: "* ]]; then
                             if [ "$ACTION_TYPE" == "quality" ]; then
                                 send_msg "$CHAT_ID" "✅ 节点 \`$TARGET_NODE\` 回应: 🔍 深海声呐已投放！请等待异步战报回传。"
                             elif [ "$ACTION_TYPE" == "log" ]; then
@@ -1131,6 +1215,16 @@ _💡 三核 = Jump(google落地) / Prem / Music(YouTube官方GL)。🔴送中 �
                             else
                                 send_msg "$CHAT_ID" "✅ 节点 \`$TARGET_NODE\` 接收指令: $ACTION_TYPE"
                             fi
+                        elif [[ "$RESPONSE" == *"FAILED_NO_PSK"* ]]; then
+                            send_msg "$CHAT_ID" "❌ [$ACTION_TYPE] 下发失败：节点缺少有效 PSK (FAILED_NO_PSK)。"
+                        elif [[ "$RESPONSE" == *"FAILED_TLS_MISMATCH"* ]]; then
+                            send_msg "$CHAT_ID" "❌ [$ACTION_TYPE] 下发失败：TLS 指纹/PSK 校验不匹配，已中止。"
+                        elif [[ "$RESPONSE" == *"401"* ]]; then
+                            send_msg "$CHAT_ID" "❌ [$ACTION_TYPE] 下发失败：节点返回 HTTP 401，认证被拒绝。"
+                        elif [[ "$RESPONSE" == *"403"* ]]; then
+                            send_msg "$CHAT_ID" "⚠️ **拒绝执行**：该节点未在本地开启此模块 (HTTP 403)。"
+                        else
+                            send_msg "$CHAT_ID" "❌ [$ACTION_TYPE] 下发失败：节点未返回预期成功响应。"
                         fi
                     else
                         render_msg "$CHAT_ID" "$MSG_ID" "❌ 数据库中未找到该节点的通讯地址。"

@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixes
+
+- OTA 将选定版本传入安装器，全程使用该版本 tag 的文件和清单；取消安装中途重新选择 main 的版本。
+- Agent 先校验核心和探针再交接服务，交接失败恢复旧文件/配置；Master 不再提前写入新版本号。
+- 只有明确接受的指令才报告下发成功，全舰队 OTA 汇总下发失败；成功下发与升级完成分开表述。
+- 修复多行控制面板的 JSON 编码，并在重命名分支直接验证输入，堵住绕过入口清洗的 SQL 注入。
+- 统一英国 UK/GB 判定，补充澳洲 Google 落地域名；保持原有日报展示格式和 Agent 自动日报停发策略。
+- 修正 OTA 测试的版本 URL 匹配，补充安装交接及界面/地区判定的离线回归验证。
+
+### 离线验证
+
+- 已通过 Agent OTA 13 场景、Agent install 2 测试/6 场景、Master install 9 场景、Master controls 6 场景；19 个 Bash 脚本 `bash -n`、Python AST 检查和 `git diff --check` 均通过。
+- 上述结果仅覆盖离线回归和静态检查；本次未实测真实 `jq`，也未进行 Telegram 实际收发。
+
 ## [v5.6.34-fork] - 2026-09-13
 
 ### 🐛 Fixes

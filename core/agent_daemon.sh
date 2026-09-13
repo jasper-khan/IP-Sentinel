@@ -483,7 +483,7 @@ if ! REMOTE_VERSION_CONTENT=$(curl -fsSL --connect-timeout 10 --retry 2 "$REMOTE
     exit 1
 fi
 REMOTE_VER=$(printf '%s' "$REMOTE_VERSION_CONTENT" | grep '^AGENT_VERSION=' | cut -d'=' -f2 | tr -d '[:space:]')
-if [ -z "$REMOTE_VER" ]; then
+if ! [[ "$REMOTE_VER" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
     notify_abort "远端 version.txt 缺少有效的 AGENT_VERSION。"
     exit 1
 fi
@@ -517,7 +517,14 @@ if [ ! -s "$OTA_TMP" ] || [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || 
     notify_abort "安装脚本为空、MANIFEST 哈希不符或脚本语法校验未通过。"
     exit 1
 fi
-bash "$OTA_TMP" > "$LOG" 2>&1
+export OTA_TARGET_VERSION="$REMOTE_VER"
+if ! bash "$OTA_TMP" > "$LOG" 2>&1; then
+    printf '%s\\n' 'OTA installer failed; see the preceding log for recovery details.' >> "$LOG"
+    MSG=$(printf '❌ OTA 安装未完成 | 节点: %s | 目标: v%s | 请检查节点升级日志，未确认升级成功。' "$(printf '%s' '{node_alias_b64}' | base64 -d)" "$REMOTE_VER")
+    curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" \\
+        --data-urlencode "text=$MSG" > /dev/null 2>&1
+    exit 1
+fi
 """
                 ota_script_b64 = base64.b64encode(ota_script.encode('utf-8')).decode('utf-8')
                 

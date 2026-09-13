@@ -66,9 +66,16 @@ INSTALL_DIR="/opt/ip_sentinel"
 CONFIG_FILE="${INSTALL_DIR}/config.conf"
 
 # [网络容灾] 挂载双栈并利用防抖重试护甲，从远端解析运行态版本约束
-VERSION_URL="${REPO_RAW_URL}/version.txt?t=$(date +%s)"
-TARGET_VERSION=$( (curl -fsSL --connect-timeout 5 --retry 2 "$VERSION_URL" || curl -4 -fsSL --connect-timeout 5 --retry 2 "$VERSION_URL") 2>/dev/null | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
-TARGET_VERSION=${TARGET_VERSION:-"4.1.1"}
+TARGET_VERSION="${OTA_TARGET_VERSION:-}"
+if [ -z "$TARGET_VERSION" ]; then
+    VERSION_URL="${REPO_RAW_URL}/version.txt?t=$(date +%s)"
+    TARGET_VERSION=$( (curl -fsSL --connect-timeout 5 --retry 2 "$VERSION_URL" || curl -4 -fsSL --connect-timeout 5 --retry 2 "$VERSION_URL") 2>/dev/null | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+fi
+if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "❌ 无法确定有效 Agent 版本，安装已取消。"
+    exit 1
+fi
+REPO_RAW_URL="${REPO_RAW_URL%/main}/v${TARGET_VERSION}-agent"
 
 version_lt() {
     test "$(printf '%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" && test "$1" != "$2"
@@ -334,22 +341,8 @@ fi
 # ==========================================================
 # [物理清洗] 安装前的环境纯净度构建与幽灵进程抹除
 # ==========================================================
-echo -e "\n⏳ 正在清理系统定时任务中的旧版条目..."
-
-crontab -l 2>/dev/null | grep -v "ip_sentinel" > "${SECURE_TMP}/cron_clean" || true
-[ -f "${SECURE_TMP}/cron_clean" ] && crontab "${SECURE_TMP}/cron_clean" >/dev/null 2>&1
-rm -f "${SECURE_TMP}/cron_clean"
-
-for CRON_FILE in "/var/spool/cron/crontabs/root" "/etc/crontabs/root"; do
-    if [ -f "$CRON_FILE" ]; then
-        grep -v "ip_sentinel" "$CRON_FILE" > "${CRON_FILE}.tmp" 2>/dev/null || true
-        cat "${CRON_FILE}.tmp" > "$CRON_FILE" 2>/dev/null || true
-        rm -f "${CRON_FILE}.tmp" 2>/dev/null
-    fi
-done
-rm -f /etc/local.d/ip_sentinel.start 2>/dev/null
-
 if [ "$UPGRADE_MODE" == "true" ]; then
+    cp -p "$CONFIG_FILE" "${SECURE_TMP}/config.before" || exit 1
     # 普通 OTA 保留节点 TLS 身份；旧版/损坏证书仍由 agent_daemon 自检后重建
     echo -e "🔐 现有 TLS 身份将在核心换血前校验并继承。"
 
@@ -919,8 +912,52 @@ fi
 # ==========================================================
 echo -e "\n[6/7] 正在部署核心引擎与热数据..."
 
-TMP_CORE="${SECURE_TMP}/core_update"
-mkdir -p "$TMP_CORE"
+INSTALL_STAGE=$(mktemp -d "${INSTALL_DIR}/.ota_stage.XXXXXX") || exit 1
+TMP_CORE="${INSTALL_STAGE}/core"
+TMP_PROBE="${INSTALL_STAGE}/probe"
+
+# [OTA 回退] 同一文件系统暂存；交接失败恢复旧文件和旧配置，再拉起旧服务。
+finish_agent_install() {
+    local rc=$? restored=true
+    trap - EXIT
+    if [ "${HANDOFF_STARTED:-0}" = "1" ] && [ "${INSTALL_COMMITTED:-0}" != "1" ]; then
+        [ "$rc" -ne 0 ] || rc=1
+        is_systemd && systemctl stop ip-sentinel-agent-daemon.service >/dev/null 2>&1
+        pkill -f 'core/webhoo[k].py' >/dev/null 2>&1 || true
+        pkill -f 'core/agent_daemo[n].sh' >/dev/null 2>&1 || true
+        local part dest
+        for part in core probe; do
+            dest="${INSTALL_DIR}/core"
+            [ "$part" = probe ] && dest="${INSTALL_DIR}/data/probe"
+            if [ -d "${INSTALL_STAGE}/old_${part}" ]; then
+                if [ -d "$dest" ]; then
+                    mv "$dest" "${INSTALL_STAGE}/failed_${part}" || { restored=false; continue; }
+                fi
+                mv "${INSTALL_STAGE}/old_${part}" "$dest" || restored=false
+            fi
+        done
+        [ ! -f "${SECURE_TMP}/config.before" ] || cp -p "${SECURE_TMP}/config.before" "$CONFIG_FILE" || restored=false
+        [ ! -f "${SECURE_TMP}/cron.before" ] || crontab "${SECURE_TMP}/cron.before" || restored=false
+        if [ "$restored" = true ]; then
+            if is_systemd; then
+                systemctl restart ip-sentinel-agent-daemon.service >/dev/null 2>&1 || restored=false
+                systemctl start ip-sentinel-updater.timer >/dev/null 2>&1 || true
+            elif [ -f "${INSTALL_DIR}/core/agent_daemon.sh" ]; then
+                nohup bash "${INSTALL_DIR}/core/agent_daemon.sh" >/dev/null 2>&1 &
+            fi
+        fi
+        echo "❌ 安装交接失败；旧文件恢复结果: ${restored}。"
+    fi
+    if [ "$restored" = true ]; then
+        rm -rf "$INSTALL_STAGE" "$SECURE_TMP"
+    else
+        echo "⚠️ 自动恢复未完成，备份保留于 $INSTALL_STAGE 和 $SECURE_TMP。"
+    fi
+    exit "$rc"
+}
+trap finish_agent_install EXIT
+trap 'exit 130' HUP INT QUIT TERM
+mkdir -p "$TMP_CORE" "$TMP_PROBE" || exit 1
 
 # ==========================================================
 # [供应链门禁] 五个核心模块均为 root 常驻产物 —— agent_daemon 持有指令通道与
@@ -970,6 +1007,17 @@ if [ -z "$CORE_OK" ]; then
     exit 1
 fi
 
+# 探针也必须在停服务前下载，并使用同一发布清单验证。
+PROBE_EXPECTED=$(awk '$2 == "data/probe/ip.sh" {print $1}' "$CORE_MANIFEST")
+if ! curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 "${REPO_RAW_URL}/data/probe/ip.sh" -o "${TMP_PROBE}/ip.sh" \
+    || [ -z "$PROBE_EXPECTED" ] \
+    || [ "$(sha256sum "${TMP_PROBE}/ip.sh" | awk '{print $1}')" != "$PROBE_EXPECTED" ]; then
+    echo "❌ 探针下载或发布清单校验失败，旧服务及探针保持不变。"
+    exit 1
+fi
+printf '%s\n' "$PROBE_EXPECTED" > "${TMP_PROBE}/ip.sh.sha256" || exit 1
+chmod 644 "${TMP_PROBE}/ip.sh" "${TMP_PROBE}/ip.sh.sha256" || exit 1
+
 # [身份连续性] 核心目录采用整组原子替换，升级时须把有效证书对带入新目录。
 # 仅继承可解析且公私钥匹配的 RSA 证书；缺失/损坏时保持为空，由新 daemon 重建。
 if [ "$UPGRADE_MODE" == "true" ] && [ -s "${INSTALL_DIR}/core/cert.pem" ] && [ -s "${INSTALL_DIR}/core/key.pem" ]; then
@@ -989,6 +1037,8 @@ if [ "$UPGRADE_MODE" == "true" ] && [ -s "${INSTALL_DIR}/core/cert.pem" ] && [ -
 fi
 
 echo "⏳ 五个核心模块已全部通过哈希校验，正在抹杀旧版守护进程..."
+crontab -l > "${SECURE_TMP}/cron.before" 2>/dev/null || true
+HANDOFF_STARTED=1
 if is_systemd; then
     systemctl kill --signal=SIGKILL ip-sentinel-agent-daemon.service >/dev/null 2>&1 || true
     systemctl stop ip-sentinel-runner.timer ip-sentinel-updater.timer ip-sentinel-report.timer ip-sentinel-agent-daemon.service >/dev/null 2>&1 || true
@@ -1002,36 +1052,32 @@ pkill -9 -f "tg_report.sh" >/dev/null 2>&1 || true
 pkill -9 -f "updater.sh" >/dev/null 2>&1 || true
 pkill -9 -f "sentinel_scheduler.sh" >/dev/null 2>&1 || true
 
-rm -rf "${INSTALL_DIR}/core" 2>/dev/null
-mv "$TMP_CORE" "${INSTALL_DIR}/core"
-chmod +x ${INSTALL_DIR}/core/*.sh
+if [ -d "${INSTALL_DIR}/core" ]; then
+    mv "${INSTALL_DIR}/core" "${INSTALL_STAGE}/old_core" || exit 1
+fi
+if [ -d "${INSTALL_DIR}/data/probe" ]; then
+    mv "${INSTALL_DIR}/data/probe" "${INSTALL_STAGE}/old_probe" || exit 1
+fi
+mkdir -p "${INSTALL_DIR}/data" || exit 1
+mv "$TMP_CORE" "${INSTALL_DIR}/core" || exit 1
+mv "$TMP_PROBE" "${INSTALL_DIR}/data/probe" || exit 1
+chmod +x ${INSTALL_DIR}/core/*.sh || exit 1
 # [残留清扫] 抹除历史版本的本地 curl 引擎 (runner/mod_google/mod_trust) 与 UA 池
 rm -f "${INSTALL_DIR}/core/runner.sh" "${INSTALL_DIR}/core/mod_google.sh" "${INSTALL_DIR}/core/mod_trust.sh" 2>/dev/null
 rm -f "${INSTALL_DIR}/data/user_agents.txt" 2>/dev/null
 rm -rf "${INSTALL_DIR}/data/keywords" 2>/dev/null
 
-# ==========================================================
-# [供应链防线] 部署 vendored 探针 + SHA-256 锁定清单
-# 探针随仓库发布整体更新，安装后任何组件不得运行时拉取第三方脚本
-# ==========================================================
-mkdir -p "${INSTALL_DIR}/data/probe"
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/probe/ip.sh" -o "${INSTALL_DIR}/data/probe/ip.sh"
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/data/probe/ip.sh.sha256" -o "${INSTALL_DIR}/data/probe/ip.sh.sha256"
-chmod 644 "${INSTALL_DIR}/data/probe/ip.sh" "${INSTALL_DIR}/data/probe/ip.sh.sha256"
-
-# [落盘门禁] 探针哈希比对失败 = 拉取被劫持，熔断安装
-if [ -s "${INSTALL_DIR}/data/probe/ip.sh" ] && [ -s "${INSTALL_DIR}/data/probe/ip.sh.sha256" ]; then
-    INSTALL_PROBE_SHA=$(sha256sum "${INSTALL_DIR}/data/probe/ip.sh" | awk '{print $1}')
-    INSTALL_EXPECT_SHA=$(tr -d '[:space:]' < "${INSTALL_DIR}/data/probe/ip.sh.sha256")
-    if [ -z "$INSTALL_EXPECT_SHA" ] || [ "$INSTALL_PROBE_SHA" != "$INSTALL_EXPECT_SHA" ]; then
-        echo -e "\033[31m❌ 致命错误：探针完整性校验失败 (下载内容与锁定哈希不符)！\033[0m"
-        echo "🛡️ 防砖机制触发：已中止安装。"
-        exit 1
+# 下载校验完成后才撤换旧调度，避免下载失败后旧看门狗已被移除。
+crontab -l 2>/dev/null | grep -v "ip_sentinel" > "${SECURE_TMP}/cron_clean" || true
+crontab "${SECURE_TMP}/cron_clean" >/dev/null 2>&1
+for CRON_FILE in "/var/spool/cron/crontabs/root" "/etc/crontabs/root"; do
+    if [ -f "$CRON_FILE" ]; then
+        grep -v "ip_sentinel" "$CRON_FILE" > "${CRON_FILE}.tmp" 2>/dev/null || true
+        cat "${CRON_FILE}.tmp" > "$CRON_FILE" 2>/dev/null || true
+        rm -f "${CRON_FILE}.tmp" 2>/dev/null
     fi
-else
-    echo -e "\033[31m❌ 致命错误：探针或哈希清单拉取失败！\033[0m"
-    exit 1
-fi
+done
+rm -f /etc/local.d/ip_sentinel.start 2>/dev/null
 
 # ==========================================================
 # [进程守护] Systemd 原生注入与微内核定时降级兜底
@@ -1195,6 +1241,40 @@ EOF
         fi
     fi
 
+# [完成门禁] 本机 TLS 监听确实启动后才提交版本及发送成功回执。
+if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
+    AGENT_READY=""
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        if python3 - "$AGENT_PORT" <<'PY_READY'
+import socket, ssl, sys
+try:
+    with socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=2) as sock:
+        with ssl._create_unverified_context().wrap_socket(sock, server_hostname='agent') as tls:
+            assert tls.getpeercert(binary_form=True)
+except Exception:
+    sys.exit(1)
+PY_READY
+        then
+            AGENT_READY=1
+            break
+        fi
+        sleep 1
+    done
+    if [ -z "$AGENT_READY" ]; then
+        echo "❌ Agent TLS 监听启动失败，取消本次升级。"
+        exit 1
+    fi
+fi
+OLD_VERSION=$(grep '^AGENT_VERSION=' "$CONFIG_FILE" | cut -d'"' -f2)
+if [ "$UPGRADE_MODE" == "true" ]; then
+    if grep -q '^AGENT_VERSION=' "$CONFIG_FILE"; then
+        sed -i "s/^AGENT_VERSION=.*/AGENT_VERSION=\"$TARGET_VERSION\"/" "$CONFIG_FILE" || exit 1
+    else
+        printf 'AGENT_VERSION="%s"\n' "$TARGET_VERSION" >> "$CONFIG_FILE" || exit 1
+    fi
+fi
+INSTALL_COMMITTED=1
+
 # ----------------------------------------------------------
 # [通讯指控] 部署后首播，打入中枢通信网关及指令态势传递
 # ----------------------------------------------------------
@@ -1204,7 +1284,6 @@ if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
     REG_MSG="#REGISTER#|${REGION_CODE}|${NODE_NAME}|${SAFE_COMM_IP}|${AGENT_PORT}|${NODE_ALIAS}|${ENABLE_OTA}|${NODE_PSK}|${SSH_PORT}|${TUNNEL_USER}|${LANG_PARAMS}|${BASE_LAT}|${BASE_LON}"
     
     if [ "$UPGRADE_MODE" == "true" ]; then
-        OLD_VERSION=$(grep "^AGENT_VERSION=" "$CONFIG_FILE" | cut -d'"' -f2)
         [ -z "$OLD_VERSION" ] && OLD_VERSION="3.3.1"
         
         # [v4.2.2 跨代升级防线] 只要是从低于 4.2.2 的版本升上来，强制要求用户点击注册指令同步多宿主弹匣
@@ -1240,11 +1319,6 @@ if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
         fi
         
         sed -i '/^NAME_HASHED=/d' "$CONFIG_FILE" 2>/dev/null
-        if grep -q "^AGENT_VERSION=" "$CONFIG_FILE"; then
-            sed -i "s/^AGENT_VERSION=.*/AGENT_VERSION=\"$TARGET_VERSION\"/" "$CONFIG_FILE"
-        else
-            echo "AGENT_VERSION=\"$TARGET_VERSION\"" >> "$CONFIG_FILE"
-        fi
         
     else
         echo -e "\n📡 正在向指挥部发送注册暗号..."

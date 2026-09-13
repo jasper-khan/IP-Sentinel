@@ -21,8 +21,10 @@ do_master_env_precheck() {
 }
 
 do_fetch_master_version() {
-    TARGET_VERSION=${TARGET_VERSION:-"4.3.1"}
-    TARGET_VERSION=${TARGET_VERSION:-"4.0.7"}
+    if [ -z "${TARGET_VERSION:-}" ]; then
+        echo -e "\033[31m❌ Master 版本未锁定，拒绝继续安装。\033[0m"
+        return 1
+    fi
 
     MASTER_DIR="/opt/ip_sentinel_master"
     DB_FILE="${MASTER_DIR}/sentinel.db"
@@ -41,12 +43,6 @@ do_master_handle_menu() {
         
         if [ -f "${MASTER_DIR}/master.conf" ]; then
             source "${MASTER_DIR}/master.conf"
-            
-            if grep -q "^MASTER_VERSION=" "${MASTER_DIR}/master.conf"; then
-                sed -i "s/^MASTER_VERSION=.*/MASTER_VERSION=\"$TARGET_VERSION\"/" "${MASTER_DIR}/master.conf"
-            else
-                echo "MASTER_VERSION=\"$TARGET_VERSION\"" >> "${MASTER_DIR}/master.conf"
-            fi
         fi
         echo -e "\033[32m✅ 已激活 [中枢静默重构模式]，即将无损覆写内核...\033[0m"
     else
@@ -80,12 +76,6 @@ do_master_handle_menu() {
                 fi
                 
                 source "${MASTER_DIR}/master.conf"
-                
-                if grep -q "^MASTER_VERSION=" "${MASTER_DIR}/master.conf"; then
-                    sed -i "s/^MASTER_VERSION=.*/MASTER_VERSION=\"$TARGET_VERSION\"/" "${MASTER_DIR}/master.conf"
-                else
-                    echo "MASTER_VERSION=\"$TARGET_VERSION\"" >> "${MASTER_DIR}/master.conf"
-                fi
                 
                 echo -e "\033[32m✅ 已激活 [平滑升级模式]，版本已锚定为 v${TARGET_VERSION}...\033[0m"
             else
@@ -161,7 +151,6 @@ do_master_config() {
 
         cat > "${MASTER_DIR}/master.conf" << EOF
 # IP-Sentinel Master 本地固化配置 (v${TARGET_VERSION})
-MASTER_VERSION="$TARGET_VERSION"
 MASTER_NODE_NAME="$MASTER_NODE_NAME"
 TG_TOKEN="$TG_TOKEN"
 DB_FILE="$DB_FILE"
@@ -219,29 +208,59 @@ EOF
     chmod 600 "$DB_FILE"
 }
 
-do_master_deploy_core() {
-    echo -e "\n[4/4] 正在拉取新版司令部核心引擎..."
+do_master_stage_payloads() {
+    echo -e "\n⏳ 正在预下载并校验新版司令部核心与引擎文件..."
 
     TMP_MASTER="${SECURE_TMP}/tg_master.sh"
-    curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/master/tg_master.sh" -o "$TMP_MASTER"
-
-    if [ ! -s "$TMP_MASTER" ]; then
-        echo -e "\033[31m❌ 致命错误：中枢核心代码拉取失败！网络阻断或 GitHub Raw 异常。\033[0m"
-        echo "🛡️ 防砖机制触发：已中止覆盖，旧版司令部仍在安全运行中。"
-        rm -f "$TMP_MASTER"
-        exit 1
+    if ! curl -fsSL --connect-timeout 10 --retry 3 \
+        "${REPO_RAW_URL}/master/tg_master.sh?t=$(date +%s)" -o "$TMP_MASTER" || [ ! -s "$TMP_MASTER" ]; then
+        echo -e "\033[31m❌ 致命错误：中枢核心代码拉取失败！\033[0m"
+        echo "🛡️ 防砖机制触发：旧版司令部仍在安全运行中。"
+        return 1
     fi
 
-    # [供应链门禁] 与 build_master.sh 同构的锁定哈希校验。此前本步仅查非空,
-    # 而 tg_master.sh 是 root 常驻、持有 TG 令牌与 PSK 的最高权限产物 ——
-    # 它是安装链上唯一没有哈希保护的落地文件。清单缺失/条目缺失同样熔断。
     EXPECTED=$(awk '$2 == "master/tg_master.sh" {print $1}' "${SECURE_TMP}/MANIFEST.sha256" 2>/dev/null)
-    ACTUAL=$(sha256sum "$TMP_MASTER" | awk '{print $1}')
-    if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
-        echo -e "\033[31m❌ 供应链熔断：中枢核心哈希与 MANIFEST.sha256 不符 (或清单缺失)。已拒绝执行。\033[0m"
-        echo "🛡️ 防砖机制触发：已中止覆盖，旧版司令部仍在安全运行中。"
-        rm -f "$TMP_MASTER"
-        exit 1
+    ACTUAL=$(sha256sum "$TMP_MASTER" 2>/dev/null | awk '{print $1}')
+    if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$TMP_MASTER"; then
+        echo -e "\033[31m❌ 供应链熔断：中枢核心哈希与 MANIFEST.sha256 不符，拒绝执行。\033[0m"
+        echo "🛡️ 防砖机制触发：旧版司令部仍在安全运行中。"
+        return 1
+    fi
+
+    if ! do_engine_stage_files; then
+        echo "🛡️ 防砖机制触发：引擎预下载失败，旧版司令部仍在安全运行中。"
+        return 1
+    fi
+}
+
+do_master_save_rollback() {
+    MASTER_ROLLBACK_DIR="${SECURE_TMP}/master_rollback"
+    mkdir -p "$MASTER_ROLLBACK_DIR" || return 1
+    MASTER_SWAPPED="false"
+    MASTER_SERVICE_STOPPED="false"
+    MASTER_ROLLBACK_CORE="false"
+    MASTER_ROLLBACK_CONFIG="false"
+
+    if [ -f "${MASTER_DIR}/tg_master.sh" ]; then
+        cp -p "${MASTER_DIR}/tg_master.sh" "${MASTER_ROLLBACK_DIR}/tg_master.sh" || return 1
+        MASTER_ROLLBACK_CORE="true"
+    fi
+    if [ -f "${MASTER_DIR}/master.conf" ]; then
+        cp -p "${MASTER_DIR}/master.conf" "${MASTER_ROLLBACK_DIR}/master.conf" || return 1
+        MASTER_ROLLBACK_CONFIG="true"
+    fi
+}
+
+do_master_deploy_core() {
+    echo -e "\n[4/4] 正在部署已校验的新版司令部核心引擎..."
+
+    if [ ! -s "${TMP_MASTER:-}" ]; then
+        echo -e "\033[31m❌ 中枢核心未完成预下载，拒绝停止现有服务。\033[0m"
+        return 1
+    fi
+    if ! do_master_save_rollback; then
+        echo -e "\033[31m❌ 无法保存旧版司令部，拒绝进行替换。\033[0m"
+        return 1
     fi
 
     echo "⏳ 新引擎校验通过，正在抹杀旧版守护进程..."
@@ -250,9 +269,17 @@ do_master_deploy_core() {
         systemctl stop ip-sentinel-master.service >/dev/null 2>&1 || true
     fi
     pkill -9 -f "tg_master.sh" >/dev/null 2>&1 || true
+    MASTER_SERVICE_STOPPED="true"
 
-    mv "$TMP_MASTER" "${MASTER_DIR}/tg_master.sh"
-    chmod +x "${MASTER_DIR}/tg_master.sh"
+    if ! mv "$TMP_MASTER" "${MASTER_DIR}/tg_master.sh"; then
+        echo -e "\033[31m❌ 新版司令部落位失败。\033[0m"
+        return 1
+    fi
+    MASTER_SWAPPED="true"
+    if ! chmod +x "${MASTER_DIR}/tg_master.sh"; then
+        echo -e "\033[31m❌ 新版司令部权限设置失败。\033[0m"
+        return 1
+    fi
 
     if is_systemd; then
         echo "💡 检测到 Systemd 环境，正在部署原生守护服务..."
@@ -278,9 +305,13 @@ IOSchedulingClass=idle
 WantedBy=multi-user.target
 EOF
 
-        systemctl daemon-reload
-        systemctl enable --now ip-sentinel-master.service
-        systemctl restart ip-sentinel-master.service
+        if ! systemctl daemon-reload || \
+           ! systemctl enable --now ip-sentinel-master.service || \
+           ! systemctl restart ip-sentinel-master.service || \
+           ! systemctl is-active --quiet ip-sentinel-master.service; then
+            echo -e "\033[31m❌ 新版司令部服务启动检查失败。\033[0m"
+            return 1
+        fi
         
         crontab -l 2>/dev/null | grep -v "tg_master.sh" | crontab - >/dev/null 2>&1 || true
     else
@@ -289,8 +320,137 @@ EOF
         echo "* * * * * pgrep -f tg_master.sh >/dev/null || nohup bash ${MASTER_DIR}/tg_master.sh >/dev/null 2>&1 &" >> "${SECURE_TMP}/cron_master"
         [ -f "${SECURE_TMP}/cron_master" ] && crontab "${SECURE_TMP}/cron_master" 2>/dev/null
         
-        pgrep -f tg_master.sh >/dev/null || { nohup bash "${MASTER_DIR}/tg_master.sh" >/dev/null 2>&1 & disown 2>/dev/null; }
+        if ! pgrep -f tg_master.sh >/dev/null 2>&1; then
+            nohup bash "${MASTER_DIR}/tg_master.sh" >/dev/null 2>&1 & disown 2>/dev/null
+        fi
+        if ! pgrep -f tg_master.sh >/dev/null 2>&1; then
+            echo -e "\033[31m❌ 新版司令部进程启动检查失败。\033[0m"
+            return 1
+        fi
     fi
+}
+
+do_master_finalize_version() {
+    local conf="${MASTER_DIR}/master.conf"
+    if [ ! -f "$conf" ]; then
+        echo -e "\033[31m❌ 配置文件不存在，无法固化 Master 版本。\033[0m"
+        return 1
+    fi
+
+    if grep -q "^MASTER_VERSION=" "$conf"; then
+        sed -i "s/^MASTER_VERSION=.*/MASTER_VERSION=\"$TARGET_VERSION\"/" "$conf" || return 1
+    else
+        printf 'MASTER_VERSION="%s"\n' "$TARGET_VERSION" >> "$conf" || return 1
+    fi
+    if ! grep -Fqx "MASTER_VERSION=\"$TARGET_VERSION\"" "$conf"; then
+        echo -e "\033[31m❌ Master 版本固化校验失败。\033[0m"
+        return 1
+    fi
+    chmod 600 "$conf" || return 1
+
+    if is_systemd; then
+        if ! systemctl restart ip-sentinel-master.service >/dev/null 2>&1 || \
+           ! systemctl is-active --quiet ip-sentinel-master.service; then
+            echo -e "\033[31m❌ 版本固化后 Master 重启检查失败。\033[0m"
+            return 1
+        fi
+    else
+        pkill -9 -f "tg_master.sh" >/dev/null 2>&1 || true
+        nohup bash "${MASTER_DIR}/tg_master.sh" >/dev/null 2>&1 & disown 2>/dev/null
+        if ! pgrep -f tg_master.sh >/dev/null 2>&1; then
+            echo -e "\033[31m❌ 版本固化后 Master 进程检查失败。\033[0m"
+            return 1
+        fi
+    fi
+    MASTER_VERSION="$TARGET_VERSION"
+}
+
+do_master_rollback() {
+    echo -e "\033[33m⚠️ 升级后置步骤失败，正在恢复旧版司令部...\033[0m"
+    if [ "${MASTER_SERVICE_STOPPED:-false}" != "true" ]; then
+        echo "ℹ️ 旧版服务未停止，跳过回滚动作。"
+        return 0
+    fi
+    ROLLBACK_FAILED="false"
+    if is_systemd; then
+        systemctl stop ip-sentinel-master.service ip-sentinel-engine.service ip-sentinel-tunnels.service >/dev/null 2>&1 || true
+    else
+        pkill -9 -f "tg_master.sh" >/dev/null 2>&1 || true
+        pkill -9 -f "engine/scheduler.sh" >/dev/null 2>&1 || true
+        pkill -9 -f "tunnel_manager.sh" >/dev/null 2>&1 || true
+    fi
+
+    if [ "${MASTER_ROLLBACK_CORE:-false}" = "true" ] && [ -f "${MASTER_ROLLBACK_DIR}/tg_master.sh" ]; then
+        if ! cp -p "${MASTER_ROLLBACK_DIR}/tg_master.sh" "${MASTER_DIR}/tg_master.sh" || \
+           ! chmod +x "${MASTER_DIR}/tg_master.sh"; then
+            echo -e "\033[31m❌ 旧版司令部恢复失败。\033[0m"
+            ROLLBACK_FAILED="true"
+        fi
+    elif [ "${MASTER_SWAPPED:-false}" = "true" ]; then
+        if ! rm -f "${MASTER_DIR}/tg_master.sh"; then
+            echo -e "\033[31m❌ 新版司令部清理失败。\033[0m"
+            ROLLBACK_FAILED="true"
+        fi
+    fi
+    if [ "${MASTER_ROLLBACK_CONFIG:-false}" = "true" ] && [ -f "${MASTER_ROLLBACK_DIR}/master.conf" ]; then
+        if ! cp -p "${MASTER_ROLLBACK_DIR}/master.conf" "${MASTER_DIR}/master.conf" || \
+           ! chmod 600 "${MASTER_DIR}/master.conf"; then
+            echo -e "\033[31m❌ 旧版 Master 配置恢复失败。\033[0m"
+            ROLLBACK_FAILED="true"
+        fi
+    fi
+
+    if [ -n "${ENG_FILES:-}" ] && [ -d "${MASTER_DIR}/engine" ]; then
+        for f in $ENG_FILES; do
+            if [ -f "${MASTER_ROLLBACK_DIR}/engine_${f}" ]; then
+                if ! cp -p "${MASTER_ROLLBACK_DIR}/engine_${f}" "${MASTER_DIR}/engine/${f}"; then
+                    echo -e "\033[31m❌ 旧版引擎文件 ${f} 恢复失败。\033[0m"
+                    ROLLBACK_FAILED="true"
+                fi
+            elif [ -f "${MASTER_ROLLBACK_DIR}/engine_${f}.missing" ]; then
+                if ! rm -f "${MASTER_DIR}/engine/${f}"; then
+                    echo -e "\033[31m❌ 新版引擎文件 ${f} 清理失败。\033[0m"
+                    ROLLBACK_FAILED="true"
+                fi
+            fi
+        done
+    fi
+
+    if [ "$ROLLBACK_FAILED" = "true" ]; then
+        : > "${SECURE_TMP}/MASTER_ROLLBACK_REQUIRED"
+        echo -e "\033[31m❌ 回滚未完全完成，已保留本地备份: ${MASTER_ROLLBACK_DIR}\033[0m"
+        return 1
+    fi
+
+    if is_systemd; then
+        if [ "${MASTER_SERVICE_STOPPED:-false}" = "true" ]; then
+            if ! systemctl daemon-reload >/dev/null 2>&1 || \
+               ! systemctl enable --now ip-sentinel-master.service >/dev/null 2>&1 || \
+               ! systemctl restart ip-sentinel-master.service >/dev/null 2>&1 || \
+               ! systemctl is-active --quiet ip-sentinel-master.service || \
+               ! systemctl restart ip-sentinel-tunnels.service >/dev/null 2>&1 || \
+               ! systemctl is-active --quiet ip-sentinel-tunnels.service || \
+               ! systemctl restart ip-sentinel-engine.service >/dev/null 2>&1 || \
+               ! systemctl is-active --quiet ip-sentinel-engine.service; then
+                : > "${SECURE_TMP}/MASTER_ROLLBACK_REQUIRED"
+                echo -e "\033[31m❌ 回滚后 Master/引擎服务启动检查失败，已保留备份。\033[0m"
+                return 1
+            fi
+        fi
+    elif [ "${MASTER_SERVICE_STOPPED:-false}" = "true" ] && [ "${MASTER_ROLLBACK_CORE:-false}" = "true" ]; then
+        nohup bash "${MASTER_DIR}/tg_master.sh" >/dev/null 2>&1 & disown 2>/dev/null
+        [ -f "${MASTER_DIR}/engine/tunnel_manager.sh" ] && nohup bash "${MASTER_DIR}/engine/tunnel_manager.sh" >/dev/null 2>&1 & disown 2>/dev/null
+        [ -f "${MASTER_DIR}/engine/scheduler.sh" ] && nohup bash "${MASTER_DIR}/engine/scheduler.sh" >/dev/null 2>&1 & disown 2>/dev/null
+        if ! pgrep -f tg_master.sh >/dev/null 2>&1 || \
+           ! pgrep -f tunnel_manager.sh >/dev/null 2>&1 || \
+           ! pgrep -f "engine/scheduler.sh" >/dev/null 2>&1; then
+            : > "${SECURE_TMP}/MASTER_ROLLBACK_REQUIRED"
+            echo -e "\033[31m❌ 回滚后 Master/引擎进程启动检查失败，已保留备份。\033[0m"
+            return 1
+        fi
+    fi
+
+    return 0
 }
 
 do_master_summary() {
