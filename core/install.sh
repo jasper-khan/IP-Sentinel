@@ -922,21 +922,55 @@ echo -e "\n[6/7] 正在部署核心引擎与热数据..."
 TMP_CORE="${SECURE_TMP}/core_update"
 mkdir -p "$TMP_CORE"
 
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/updater.sh" -o "${TMP_CORE}/updater.sh"
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/tg_report.sh" -o "${TMP_CORE}/tg_report.sh"
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/agent_daemon.sh" -o "${TMP_CORE}/agent_daemon.sh"
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/uninstall.sh" -o "${TMP_CORE}/uninstall.sh"
-curl -fsSL --connect-timeout 10 --retry 3 "${REPO_RAW_URL}/core/mod_quality.sh" -o "${TMP_CORE}/mod_quality.sh"
+# ==========================================================
+# [供应链门禁] 五个核心模块均为 root 常驻产物 —— agent_daemon 持有指令通道与
+# PSK/TOFU, updater 由定时器驱动 —— 必须与 MANIFEST.sha256 锁定哈希强比对后才
+# 允许换血。原自检墙只查其中两个文件"非空", 现已由哈希校验整体取代。
+# 重试的退出条件是"五个哈希全对上了"而非"文件拿到了" (curl --retry 不重试
+# 404, 而 raw.githubusercontent 的间歇 404 是瞬时故障)
+# ==========================================================
+CORE_FILES="updater.sh tg_report.sh agent_daemon.sh uninstall.sh mod_quality.sh"
+CORE_MANIFEST="${SECURE_TMP}/MANIFEST.sha256"
 
-# 🛡️ 终极自检墙：一旦任意文件缺失或长度为零，直接熔断放弃覆写，确保宿主不宕机
-if [ ! -s "${TMP_CORE}/agent_daemon.sh" ] || [ ! -s "${TMP_CORE}/mod_quality.sh" ]; then
-    echo -e "\033[31m❌ 致命错误：核心代码拉取失败！网络阻断或 GitHub Raw 异常。\033[0m"
+if [ ! -s "$CORE_MANIFEST" ]; then
+    for _i in 1 2 3 4 5; do
+        curl -fsSL --connect-timeout 10 "${REPO_RAW_URL}/MANIFEST.sha256?t=$(date +%s)" \
+            -o "$CORE_MANIFEST" 2>/dev/null
+        [ -s "$CORE_MANIFEST" ] && break
+        sleep 2
+    done
+fi
+
+if [ ! -s "$CORE_MANIFEST" ]; then
+    echo -e "\033[31m❌ 供应链熔断：无法取得 MANIFEST.sha256，拒绝安装未校验的核心模块。\033[0m"
     echo "🛡️ 防砖机制触发：已中止覆盖，旧版哨兵引擎仍安全存活中。"
     rm -rf "$TMP_CORE"
     exit 1
 fi
 
-echo "⏳ 新引擎校验通过，正在抹杀旧版守护进程..."
+CORE_OK=""; CORE_BAD="?"
+for _i in 1 2 3 4 5; do
+    CORE_OK="1"
+    for f in $CORE_FILES; do
+        curl -fsSL --connect-timeout 10 "${REPO_RAW_URL}/core/${f}" -o "${TMP_CORE}/${f}" 2>/dev/null
+        CORE_EXPECTED=$(awk -v t="core/${f}" '$2 == t {print $1}' "$CORE_MANIFEST" 2>/dev/null)
+        CORE_ACTUAL=$(sha256sum "${TMP_CORE}/${f}" 2>/dev/null | awk '{print $1}')
+        if [ -z "$CORE_EXPECTED" ] || [ "$CORE_EXPECTED" != "$CORE_ACTUAL" ]; then
+            CORE_OK=""; CORE_BAD="$f"; break
+        fi
+    done
+    [ -n "$CORE_OK" ] && break
+    sleep 2
+done
+
+if [ -z "$CORE_OK" ]; then
+    echo -e "\033[31m❌ 供应链熔断：核心模块 [${CORE_BAD}] 拉取失败, 或哈希与 MANIFEST 不符 (含清单缺条目)。\033[0m"
+    echo "🛡️ 防砖机制触发：已中止覆盖，旧版哨兵引擎仍安全存活中。"
+    rm -rf "$TMP_CORE"
+    exit 1
+fi
+
+echo "⏳ 五个核心模块已全部通过哈希校验，正在抹杀旧版守护进程..."
 if is_systemd; then
     systemctl kill --signal=SIGKILL ip-sentinel-agent-daemon.service >/dev/null 2>&1 || true
     systemctl stop ip-sentinel-runner.timer ip-sentinel-updater.timer ip-sentinel-report.timer ip-sentinel-agent-daemon.service >/dev/null 2>&1 || true

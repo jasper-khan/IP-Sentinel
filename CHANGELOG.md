@@ -1,5 +1,16 @@
 # Changelog
 
+## [v5.6.31-agent] - 2026-09-13
+
+### 🔒 Hardening
+
+- **Agent 安装链补齐锁定哈希门禁** — 中枢侧刚补完，回头查 agent 侧发现缺口更彻底：`core/install.sh` 部署 5 个核心模块时**连 MANIFEST 都没拉过**（全文件 grep 无 `MANIFEST` 字样），而 `core/agent_daemon.sh`（持有指令通道与 PSK/TOFU）、`core/updater.sh`（定时器驱动）、`core/mod_quality.sh`、`core/tg_report.sh`、`core/uninstall.sh` 五个**全部在 MANIFEST 锁定范围内**。原"🛡️ 终极自检墙"只检查其中两个文件"非空"，另外三个连非空都不查 —— 这也是名不副实的"新引擎校验通过"
+  - 现改为：先取 `MANIFEST.sha256`（取不到即熔断，拒绝安装未校验代码），再对五个模块逐个强比对哈希，**全数通过才允许换血**
+  - 自检墙由哈希校验整体取代（哈希一致必然非空，更强）
+  - 重试沿用全项目经验：退出条件是"五个哈希全对上了"而非"文件拿到了"（curl 的 `--retry` 不重试 404，而 raw.githubusercontent 的间歇 404 是瞬时故障）
+  - 防砖语义不变：任一失败即清空暂存区并中止，正在运行的旧版哨兵引擎不受影响
+  - 发布形态：`v5.6.31-agent`（AGENT 通道首次走拆分后的新命名，中枢侧 `v5.6.32-fork` 已在上一轮发布）
+
 ## [v5.6.32-fork] - 2026-09-13
 
 ### 🔒 Hardening
