@@ -37,22 +37,54 @@ db_exec() {
     printf ".timeout 5000\n%s\n" "$1" | sqlite3 "$DB_FILE"
 }
 
-# [persona 配套] 节点区域关键词缺失时按需拉取 (数据文件,非执行内容)
-ensure_keywords() {
-    local region="$1"
-    local kw_file="${KEYWORDS_DIR}/kw_${region}.txt"
-    [ -s "$kw_file" ] && return 0
-    curl -fsSL --connect-timeout 10 --retry 2 "${REPO_RAW_URL}/data/keywords/kw_${region}.txt" \
-        -o "$kw_file" 2>/dev/null || { rm -f "$kw_file"; log "WARN kw_${region}.txt 拉取失败,会话将无关键词"; }
+# [数据保鲜] 非空文件 24h 内复用, 过期/缺失时安全刷新
+ensure_data_file() {
+    local target="$1" url="$2"
+    local name now mtime age tmp
+    name=$(basename "$target")
+    local keep="保留旧文件"
+    [ -s "$target" ] || keep="本轮无数据可用"
+
+    if [ -s "$target" ]; then
+        now=$(date +%s)
+        mtime=$(stat -c %Y "$target" 2>/dev/null)
+        if [ -n "$mtime" ]; then
+            age=$((now - mtime))
+            [ "$age" -lt 86400 ] && return 0
+        fi
+    fi
+
+    tmp=$(mktemp "${target}.XXXXXX" 2>/dev/null) || { log "WARN ${name} 临时文件创建失败, ${keep}"; return 1; }
+
+    if ! curl -fsSL --connect-timeout 10 --retry 2 --max-time 30 "$url" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        log "WARN ${name} 拉取失败, ${keep}"
+        return 1
+    fi
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        log "WARN ${name} 响应为空(已丢弃), ${keep}"
+        return 1
+    fi
+
+    if ! mv -f "$tmp" "$target"; then
+        rm -f "$tmp"
+        log "WARN ${name} 刷新替换失败, ${keep}"
+        return 1
+    fi
+    log "刷新 ${name} ($(wc -l < "$target") 行)"
 }
 
-# [persona 配套] 节点区域白名单 (IP 信用净化深访目标) 缺失时按需拉取
+# [persona 配套] 节点区域关键词 (过期/缺失时刷新)
+ensure_keywords() {
+    local region="$1"
+    ensure_data_file "${KEYWORDS_DIR}/kw_${region}.txt" "${REPO_RAW_URL}/data/keywords/kw_${region}.txt"
+}
+
+# [persona 配套] 节点区域白名单 (IP 信用净化深访目标, 过期/缺失时刷新)
 ensure_whitelist() {
     local region="$1"
-    local wl_file="${WHITELIST_DIR}/wl_${region}.txt"
-    [ -s "$wl_file" ] && return 0
-    curl -fsSL --connect-timeout 10 --retry 2 "${REPO_RAW_URL}/data/whitelist/wl_${region}.txt" \
-        -o "$wl_file" 2>/dev/null || { rm -f "$wl_file"; log "WARN wl_${region}.txt 拉取失败,净化将无白名单"; }
+    ensure_data_file "${WHITELIST_DIR}/wl_${region}.txt" "${REPO_RAW_URL}/data/whitelist/wl_${region}.txt"
 }
 
 # 节点端口查询 (隧道管理器维护的持久映射)
