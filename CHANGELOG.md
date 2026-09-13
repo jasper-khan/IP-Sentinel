@@ -1,5 +1,11 @@
 # Changelog
 
+## [v5.6.32-agent] - 2026-09-13
+
+### 📊 Reporting
+
+- **取消 Agent 每日节点日报** — 升级时移除 Systemd timer、兼容调度器和 cron 的自动推送；手动 `/trigger_report` 入口保留。
+
 ## [v5.6.33-fork] - 2026-09-13
 
 ### 📊 Reporting
