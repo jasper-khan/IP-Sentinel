@@ -445,8 +445,7 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
                                 repo_url = line.split('=', 1)[1].strip('"\'')
                                 break
 
-                err_msg = f"❌ **OTA 熔断告警**\n📍 节点: `{config_mem.get('NODE_ALIAS', '未知')}`\n⚠️ 原因: 下载内容与仓库 MANIFEST 锁定哈希不符或脚本语法校验未通过。\n🚀 状态: 升级已取消，节点安全。"
-                err_msg_b64 = base64.b64encode(err_msg.encode('utf-8')).decode('utf-8')
+                node_alias_b64 = base64.b64encode(config_mem.get('NODE_ALIAS', '未知').encode('utf-8')).decode('utf-8')
 
                 tg_url = config_mem.get('TG_API_URL', '')
                 chat_id = config_mem.get('CHAT_ID', '')
@@ -464,10 +463,32 @@ export SILENT_OTA="true"
 LOG=/opt/ip_sentinel/logs/ota_upgrade.log
 ver_lt() {{ test "$(printf '%s\\n' "$1" "$2" | sort -V | head -n 1)" = "$1" && test "$1" != "$2"; }}
 LOCAL_VER=$(grep '^AGENT_VERSION=' /opt/ip_sentinel/config.conf 2>/dev/null | cut -d'"' -f2)
-REMOTE_VER=$(curl -fsSL --connect-timeout 10 --retry 2 {repo_url}/version.txt | grep '^AGENT_VERSION=' | cut -d'=' -f2 | tr -d '[:space:]')
+notify_abort() {{
+    local reason="$1"
+    local msg
+    msg=$(printf '❌ OTA 熔断告警 | 节点: %s | ⚠️ 原因: %s | 🚀 状态: 升级已取消，节点安全。' "$(printf '%s' '{node_alias_b64}' | base64 -d)" "$reason")
+    echo "OTA Aborted: $reason" > "$LOG"
+    curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" --data-urlencode "text=$msg" > /dev/null 2>&1
+}}
+OTA_TMP=""
+MANIFEST_TMP=""
+cleanup_ota_tmp() {{
+    if [ -n "$OTA_TMP" ]; then
+        rm -f "$OTA_TMP"
+    fi
+    if [ -n "$MANIFEST_TMP" ]; then
+        rm -f "$MANIFEST_TMP"
+    fi
+}}
+trap cleanup_ota_tmp EXIT
+if ! REMOTE_VERSION_CONTENT=$(curl -fsSL --connect-timeout 10 --retry 2 {repo_url}/version.txt); then
+    notify_abort "无法下载远端 version.txt。"
+    exit 1
+fi
+REMOTE_VER=$(printf '%s' "$REMOTE_VERSION_CONTENT" | grep '^AGENT_VERSION=' | cut -d'=' -f2 | tr -d '[:space:]')
 if [ -z "$REMOTE_VER" ]; then
-    echo "OTA Aborted: remote version.txt unavailable" > "$LOG"
-    exit 0
+    notify_abort "远端 version.txt 缺少有效的 AGENT_VERSION。"
+    exit 1
 fi
 if ! ver_lt "$LOCAL_VER" "$REMOTE_VER"; then
     MSG=$(echo '{skip_msg_b64}' | base64 -d)
@@ -476,24 +497,29 @@ if ! ver_lt "$LOCAL_VER" "$REMOTE_VER"; then
     exit 0
 fi
 TAG_URL=$(echo "{repo_url}" | sed 's|/main$||')/v${{REMOTE_VER}}-agent
-OTA_TMP=$(mktemp /tmp/ips_ota.XXXXXX.sh)
-MANIFEST_TMP=$(mktemp /tmp/ips_ota_manifest.XXXXXX)
-curl -fsSL --connect-timeout 10 --retry 2 "${{TAG_URL}}/MANIFEST.sha256" -o "$MANIFEST_TMP" || MANIFEST_TMP=""
-if [ ! -s "$MANIFEST_TMP" ]; then
-    echo "OTA Aborted: MANIFEST.sha256 unavailable (tag v${{REMOTE_VER}}-agent)" > "$LOG"
-    exit 0
+if ! OTA_TMP=$(mktemp /tmp/ips_ota.XXXXXX.sh); then
+    notify_abort "无法创建安装脚本临时文件。"
+    exit 1
 fi
-curl -fsSL --connect-timeout 10 --retry 2 "${{TAG_URL}}/core/install.sh" -o "$OTA_TMP" || OTA_TMP=""
+if ! MANIFEST_TMP=$(mktemp /tmp/ips_ota_manifest.XXXXXX); then
+    notify_abort "无法创建清单临时文件。"
+    exit 1
+fi
+if ! curl -fsSL --connect-timeout 10 --retry 2 "${{TAG_URL}}/MANIFEST.sha256" -o "$MANIFEST_TMP" || [ ! -s "$MANIFEST_TMP" ]; then
+    notify_abort "无法下载有效清单 MANIFEST.sha256 (tag v${{REMOTE_VER}}-agent)，请检查发布标签和网络。"
+    exit 1
+fi
+if ! curl -fsSL --connect-timeout 10 --retry 2 "${{TAG_URL}}/core/install.sh" -o "$OTA_TMP"; then
+    notify_abort "无法下载安装脚本 core/install.sh (tag v${{REMOTE_VER}}-agent)。"
+    exit 1
+fi
 EXPECTED=$(awk '$2 == "core/install.sh" {{print $1}}' "$MANIFEST_TMP")
 ACTUAL=$(sha256sum "$OTA_TMP" 2>/dev/null | awk '{{print $1}}')
 if [ ! -s "$OTA_TMP" ] || [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ] || ! bash -n "$OTA_TMP"; then
-    MSG=$(echo '{err_msg_b64}' | base64 -d)
-    curl -s -m 10 -X POST "{tg_url}" -d "chat_id={chat_id}" -d "text=$MSG" -d "parse_mode=Markdown" > /dev/null 2>&1
-    echo "OTA Integrity Failed: manifest mismatch" > "$LOG"
-else
-    bash "$OTA_TMP" > "$LOG" 2>&1
+    notify_abort "安装脚本为空、MANIFEST 哈希不符或脚本语法校验未通过。"
+    exit 1
 fi
-rm -f "$OTA_TMP" "$MANIFEST_TMP"
+bash "$OTA_TMP" > "$LOG" 2>&1
 """
                 ota_script_b64 = base64.b64encode(ota_script.encode('utf-8')).decode('utf-8')
                 

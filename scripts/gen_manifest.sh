@@ -1,5 +1,9 @@
 #!/bin/bash
 # ==========================================================
+# 发布通道: MASTER_VERSION 变更须发布 v${MASTER_VERSION}-fork;
+# AGENT_VERSION 变更须发布 v${AGENT_VERSION}-agent, 两者独立。
+# 版本提交、清单提交完成后, 将 main 与本次所需标签一起 atomic push,
+# 避免 version.txt 已可见但对应 OTA 标签尚不存在。
 # 脚本名称: gen_manifest.sh (维护工具)
 # 核心功能: 生成 MANIFEST.sha256 —— 仓库对外分发文件的哈希锁定清单
 # 用法: 在仓库根目录执行 bash scripts/gen_manifest.sh，
@@ -53,3 +57,5 @@ done
 echo "✅ $MANIFEST regenerated ($(wc -l < "$MANIFEST") entries, 对 git blob 哈希)"
 echo "⚠️  发布流程: bump version.txt → commit → 运行本脚本 → commit 清单 → tag"
 echo "    (清单必须最后生成: 它锁定的是已提交的 blob)"
+echo '    Master 更新: v${MASTER_VERSION}-fork; Agent 更新: v${AGENT_VERSION}-agent'
+echo '    main 与本次所需标签一起 git push --atomic; 仅更新 Master 不要求 Agent 标签'
