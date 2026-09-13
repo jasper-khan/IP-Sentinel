@@ -1032,6 +1032,10 @@ if is_systemd; then
     rm -f /etc/systemd/system/ip-sentinel-runner.service /etc/systemd/system/ip-sentinel-runner.timer
     systemctl disable --now ip-sentinel-runner.timer >/dev/null 2>&1 || true
 
+    # [简报策略] Agent 不再每日自动推送节点日报, 清理旧版本遗留的调度单元
+    systemctl disable --now ip-sentinel-report.timer ip-sentinel-report.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/ip-sentinel-report.timer /etc/systemd/system/ip-sentinel-report.service
+
     cat > /etc/systemd/system/ip-sentinel-updater.service << EOF
 [Unit]
 Description=IP-Sentinel Updater Service
@@ -1061,30 +1065,6 @@ EOF
     systemctl enable --now ip-sentinel-updater.timer
 
     if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
-        cat > /etc/systemd/system/ip-sentinel-report.service << EOF
-[Unit]
-Description=IP-Sentinel Telegram Report Service
-After=network.target
-[Service]
-Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-SyslogIdentifier=ip-sentinel
-Type=oneshot
-ExecStart=/bin/bash ${INSTALL_DIR}/core/tg_report.sh
-User=root
-CPUSchedulingPolicy=idle
-IOSchedulingClass=idle
-EOF
-
-        cat > /etc/systemd/system/ip-sentinel-report.timer << EOF
-[Unit]
-Description=Timer for IP-Sentinel Telegram Report Service
-[Timer]
-OnCalendar=*-*-* 16:00:00 UTC
-Unit=ip-sentinel-report.service
-[Install]
-WantedBy=timers.target
-EOF
-
         cat > /etc/systemd/system/ip-sentinel-agent-daemon.service << EOF
 [Unit]
 Description=IP-Sentinel Agent Daemon Service
@@ -1107,7 +1087,6 @@ EOF
         [ -n "$DAEMON_IP" ] && echo "$DAEMON_IP" > "${INSTALL_DIR}/core/.last_ip" || echo "$(echo "$SAFE_PUBLIC_IP" | tr -d '[]')" > "${INSTALL_DIR}/core/.last_ip"
         
         systemctl daemon-reload
-        systemctl enable --now ip-sentinel-report.timer
         systemctl enable --now ip-sentinel-agent-daemon.service
     fi
     else
@@ -1139,9 +1118,6 @@ while true; do
     if [ "\$HOUR" == "${DEPLOY_UTC_HOUR}" ] && [ "\$MIN" == "${DEPLOY_UTC_MIN}" ]; then
         /bin/bash /opt/ip_sentinel/core/updater.sh >/dev/null 2>&1
     fi
-    if [ "\$HOUR" == "16" ] && [ "\$MIN" == "00" ]; then
-        /bin/bash /opt/ip_sentinel/core/tg_report.sh >/dev/null 2>&1
-    fi
     if ! pgrep -f 'webhook.py' >/dev/null; then
         /bin/bash /opt/ip_sentinel/core/agent_daemon.sh >/dev/null 2>&1 &
     fi
@@ -1166,7 +1142,6 @@ EOF
             echo "${DEPLOY_UTC_MIN} ${DEPLOY_UTC_HOUR} * * * ${INSTALL_DIR}/core/updater.sh >/dev/null 2>&1" >> "${SECURE_TMP}/cron_backup"
             
             if [[ -n "$TG_TOKEN" ]] && [[ -n "$CHAT_ID" ]]; then
-                echo "0 16 * * * ${INSTALL_DIR}/core/tg_report.sh >/dev/null 2>&1" >> "${SECURE_TMP}/cron_backup"
                 echo "$SAFE_PUBLIC_IP" > "${INSTALL_DIR}/core/.last_ip"
                 DAEMON_IP=$( (curl -s -m 5 api.ip.sb/ip || curl -s -m 5 ifconfig.me) 2>/dev/null | tr -d '[:space:]' )
                 [ -n "$DAEMON_IP" ] && echo "$DAEMON_IP" > "${INSTALL_DIR}/core/.last_ip" || echo "$(echo "$SAFE_PUBLIC_IP" | tr -d '[]')" > "${INSTALL_DIR}/core/.last_ip"

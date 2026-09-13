@@ -42,7 +42,6 @@ CUTOFF=$(date -u -d '24 hours ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
 [ -z "$CUTOFF" ] && CUTOFF="0000-00-00 00:00:00"
 TODAY=$(date -u '+%Y-%m-%d')
 GEN=$(date -u '+%Y-%m-%d %H:%M UTC')
-DIV="───────────────────────"
 
 CHATS=$(db_exec "SELECT DISTINCT chat_id FROM nodes WHERE psk IS NOT NULL AND psk!='';")
 for chat in $CHATS; do
@@ -78,67 +77,64 @@ for chat in $CHATS; do
         [ "$watchv" -gt 0 ] && parts="${parts} 🟡${watchv}"
         [ "$siniv" -gt 0 ] && parts="${parts} 🔴${siniv}"
         [ "$failv" -gt 0 ] && parts="${parts} ⚪${failv}"
-        # 时区 + 城市
+        # 时区
         tz=$(grep "启动会话" "$LOG" 2>/dev/null | grep -F "[$n]" | tail -1 | grep -o 'tz=[^ ]*' | cut -d= -f2)
         [ -z "$tz" ] && tz="?"
-        city=""; [ "$tz" != "?" ] && city=$(echo "$tz" | awk -F/ '{print $NF}' | tr '_' ' ')
         # 最新自检落盘
-        RF="${PROFILES}/${n}.region"; verdict="未检测"; jump=""; lastchk=""; jgl=""; prem=""; music=""
+        RF="${PROFILES}/${n}.region"; verdict="未检测"; jgl=""; prem=""; music=""
         if [ -f "$RF" ]; then
             v=$(sed -n 's/.*"verdict": *"\([^"]*\)".*/\1/p' "$RF"); [ -n "$v" ] && verdict="$v"
-            jump=$(sed -n 's/.*"jump": *"\([^"]*\)".*/\1/p' "$RF")
             jgl=$(sed -n 's/.*"jump_gl": *"\([^"]*\)".*/\1/p' "$RF")
             prem=$(sed -n 's/.*"prem": *"\([^"]*\)".*/\1/p' "$RF")
             music=$(sed -n 's/.*"music": *"\([^"]*\)".*/\1/p' "$RF")
-            rts=$(sed -n 's/.*"ts": *\([0-9]*\).*/\1/p' "$RF")
-            [ -n "$rts" ] && lastchk=$(date -u -d "@$rts" '+%m-%d %H:%M UTC' 2>/dev/null)
         fi
         em=$(verdict_emoji "$verdict")
         # 报警只认送中 (SINICIZED): 已接受的 DRIFT 恒常态不每天报警 (2026-09-11 用户反馈)
         [ "$verdict" = "SINICIZED" ] && FLAG=$((FLAG+1))
         showip=$(echo "$ip" | tr '_' ' ' | awk '{print $1}')
-        fl=$(get_flag "$region"); loc="$region"; [ -n "$city" ] && loc="$region / $city"
+        fl=$(get_flag "$region")
 
         # Google 区域纠偏行
         if [ "$totv" -gt 0 ]; then
-            gline="🎯 *Google 区域纠偏*: 24h ${sess} 次 · 达成率 *${gr}%* (${parts})"
+            gline="🎯 *Google 区域纠偏*: ${sess} 次 · 达成率 *${gr}%* (${parts})"
         elif [ "$sess" -gt 0 ]; then
-            gline="🎯 *Google 区域纠偏*: 24h ${sess} 次"
+            gline="🎯 *Google 区域纠偏*: ${sess} 次"
         else
-            gline="🎯 *Google 区域纠偏*: 近 24h 无会话 (调度 45min/轮)"
+            gline="🎯 *Google 区域纠偏*: 无会话 (调度 45min/轮)"
         fi
         # 自检详情行
         if [ "$verdict" = "未检测" ]; then
-            vline="   最近自检: ⚪ 未检测"
+            vline="最近自检: ⚪ 未检测"
         elif [ "$verdict" = "OK" ]; then
-            # OK 节点压缩成一行: 三核全是目标区, 无信息量
-            vline="   最近自检: 🟢 目标达成 · ${lastchk:-?}"
+            vline="最近自检: 🟢 目标达成 (Jump: ${jgl:-?} | Prem: ${prem:-?} | Music: ${music:-?})"
         else
             case "$verdict" in
                 WATCH) vcn="观察";; DRIFT) vcn="区域漂移";;
                 SINICIZED) vcn="送中";; PROBE_FAIL) vcn="探针失效";; *) vcn="$verdict";;
             esac
-            vline="   最近自检: ${em} ${vcn} (Jump: ${jgl:-?} | Prem: ${prem:-?} | Music: ${music:-?})"
-            # 异常时附原始证据 (落地域名)
-            case "$verdict" in PROBE_FAIL) ;; *) [ -n "$jump" ] && vline="${vline} · ${jump}";; esac
-            vline="${vline} · ${lastchk:-?}"
+            vline="最近自检: ${em} ${vcn} (Jump: ${jgl:-?} | Prem: ${prem:-?} | Music: ${music:-?})"
         fi
-        card="${fl} *${alias}*  ·  ${loc}
-📡 出口 IP: \`${showip}\`  ·  🕐 \`${tz}\`
+        card="${fl} *${alias}*
+📡 出口 IP: \`${showip}\`
+🕐 \`${tz}\`
 ${gline}
 ${vline}
-🔰 *IP 信用净化*: 24h 深访白名单 ${trust} 次"
-        [ -n "$CARDS" ] && CARDS="${CARDS}
-${DIV}"
-        CARDS="${CARDS}
+🔰 *IP 信用净化*: ${trust} 次"
+        if [ -n "$CARDS" ]; then
+            CARDS="${CARDS}
+
 ${card}"
+        else
+            CARDS="$card"
+        fi
     done <<< "$NODES"
 
     ALERT=""; [ "$FLAG" -gt 0 ] && ALERT="
 ⚠️ *${FLAG} 个节点被判定送中, 请处理*"
     MSG="📊 *IP-Sentinel 每日养护简报*
 📅 ${TODAY} UTC · 节点 ${N} 台 · 🎯纠偏 ${GTOTAL} 次 · 🔰净化 ${TTOTAL} 次${ALERT}
-═══════════════════════${CARDS}
+═══════════════════════
+${CARDS}
 ═══════════════════════
 ⏱️ 战报生成 \`${GEN}\` · 引擎 v${MASTER_VERSION:-?}"
     send "$chat" "$MSG"

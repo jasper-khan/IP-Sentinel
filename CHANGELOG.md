@@ -1,5 +1,12 @@
 # Changelog
 
+## [v5.6.33-fork] - 2026-09-13
+
+### 📊 Reporting
+
+- **Master 每日养护简报改为完整但紧凑的节点卡片** — 保留所有节点的出口 IP、时区、纠偏统计、达成率、`Jump / Prem / Music` 自检结果和净化次数；移除重复城市信息、节点级自检时间和节点间分隔线。
+- **取消 Agent 每日节点日报** — 移除 Systemd timer、兼容调度器和 cron 的自动推送；手动 `/trigger_report` 入口保留。
+
 ## [v5.6.31-agent] - 2026-09-13
 
 ### 🔒 Hardening
