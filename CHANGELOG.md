@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v5.6.35-fork / v5.6.34-agent] - 2026-09-13
 
 ### Fixes
 
