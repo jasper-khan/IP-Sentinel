@@ -217,7 +217,10 @@ call_agent() {
                     new_fp=$(echo | openssl s_client -connect "${ip}:${port}" -servername "agent" 2>/dev/null                         | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d'=' -f2 | tr -d ':')
                     if [ -n "$new_fp" ]; then
                         db_exec "UPDATE nodes SET cert_fp='${new_fp}' WHERE chat_id='${CHAT_ID}' AND node_name='${node_key}';"
-                        send_msg "$CHAT_ID" "🔄 节点 \`${node_key}\` 证书变化经 PSK 挑战验证为合法轮换 (疑似 OTA 升级), 指纹已自动重锁。"
+                        # PSK 已证明节点身份，属于可自愈审计事件；落本地日志，避免舰队 OTA 刷屏
+                        printf '[%s] node=%s PSK 验证通过，TLS 指纹已合法重锁。\n' \
+                            "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$node_key" \
+                            >> "${MASTER_DIR}/logs/tls_rotation.log"
                     fi
                 else
                     send_msg "$CHAT_ID" "🚨 **[安全告警] 节点 \`${node_key}\` (${ip}) 证书指纹与锁定值不符且 PSK 挑战验证失败！疑似中间人攻击，本次指令已中止。**"
@@ -531,7 +534,7 @@ while true; do
                     fi
                     # 👆 ----------------------------------------------------- 👆
                     
-                    REMOTE_VER=$(curl -s -m 2 "${REPO_RAW_URL}/version.txt" | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+                    REMOTE_VER=$(curl -s -m 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)" | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
                     VER_INFO="当前版本: \`v${MASTER_VERSION}\`"
                     
                     BTN_MASTER_OTA=""
@@ -563,7 +566,7 @@ while true; do
                 "all_ota_confirm")
                     if [ -z "$CB_ID" ]; then send_msg "$CHAT_ID" "⛔ 安全拦截：非法特权执行环境。"; continue; fi
                     # [Safe OTA] 确认弹窗展示目标版本 (tag 锚定, Agent 端另有版本守卫)
-                    FLEET_VER=$(curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt" | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+                    FLEET_VER=$(curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)" | grep "^AGENT_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
                     FLEET_VER_LINE=""
                     [ -n "$FLEET_VER" ] && FLEET_VER_LINE="\n🎯 **目标版本**: \`v${FLEET_VER}\` (tag 锚定 + MANIFEST 验签，已是最新版本将自动跳过)\n"
                     CONFIRM_BTNS="[[{\"text\":\"🚨 我已了解风险，下发核按钮指令！\",\"callback_data\":\"all_ota_execute\"}], [{\"text\":\"取消操作\",\"callback_data\":\"/start\"}]]"
@@ -683,7 +686,7 @@ while true; do
                     render_msg "$CHAT_ID" "$MSG_ID" "⏳ 正在校验重构图纸 (tag 锚定 + MANIFEST 验签)..."
 
                     # [Safe OTA] 版本守卫: 远端不比本地新即拒绝 (防重装/降级)
-                    REMOTE_VER=$(curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt" | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
+                    REMOTE_VER=$(curl -fsSL --connect-timeout 5 --retry 2 "${REPO_RAW_URL}/version.txt?t=$(date +%s)" | grep "^MASTER_VERSION=" | cut -d'=' -f2 | tr -d '[:space:]')
                     if [ -z "$REMOTE_VER" ]; then
                         send_msg "$CHAT_ID" "❌ OTA 中止: 无法读取远端版本信息 (version.txt 不可达)，升级取消。"
                         continue

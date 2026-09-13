@@ -1,5 +1,12 @@
 # Changelog
 
+## [v5.6.34-fork] - 2026-09-13
+
+### 🐛 Fixes
+
+- **全舰队 OTA 不再刷合法证书轮换消息** — PSK 挑战已经证明节点持有正确密钥，合法重锁改为写入 Master 本地 `logs/tls_rotation.log`；只有 PSK 挑战失败的真实证书异常继续发送 Telegram 安全告警。
+- **Master 版本探针绕过 GitHub Raw 缓存** — 中枢版本、全舰队目标版本和 Master OTA 的 `version.txt` 请求统一加入时间戳，避免连续发版后显示旧版本。
+
 ## [v5.6.33-agent] - 2026-09-13
 
 ### 🐛 Fixes
