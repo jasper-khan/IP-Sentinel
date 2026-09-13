@@ -92,11 +92,10 @@ node_port() {
     awk -F'|' -v n="$1" '$1 == n {print $2}' "$PORT_MAP_FILE" 2>/dev/null | head -n 1
 }
 
-# 活跃会话计数 (每个会话 = 一个 camoufox_session.py 进程)
-# pgrep -fc 无匹配时输出空且 exit 1 → || echo 0 会产生第二行;只取首行数字
+# 只匹配直接运行会话脚本的 Python，排除命令行同样含脚本名的 timeout 包装进程。
 active_sessions() {
     local n
-    n=$(pgrep -fc "camoufox_session.py" 2>/dev/null)
+    n=$(pgrep -fc '^[^[:space:]]*python3[[:space:]]+[^[:space:]]*/camoufox_session[.]py[[:space:]]' 2>/dev/null)
     [ -z "$n" ] && n=0
     echo "$n"
 }
@@ -181,12 +180,12 @@ consume_trigger() {
     [ -z "$focus" ] && focus="all"
     # [调度取证] 触发文件写入时刻 (排查非按钮来源的触发)
     log "触发消费: focus=$focus file_mtime=$(stat -c '%y' "$trig" 2>/dev/null | cut -d. -f1)"
-    rm -f "$trig"
     if node_running "$n"; then
         log "节点 ${n} 手动触发: 会话进行中,触发并入下一轮"
         return 1
     fi
-    launch_session "$n" "$region" "$lp" "$lat" "$lon" "$ip" "$focus"
+    launch_session "$n" "$region" "$lp" "$lat" "$lon" "$ip" "$focus" || return 1
+    rm -f "$trig"
     return 0
 }
 
@@ -201,18 +200,20 @@ while true; do
     SLOTS=$((ENGINE_CONCURRENCY - ACTIVE))
 
     if [ "$SLOTS" -gt 0 ]; then
-        NODES=$(db_exec "SELECT node_name, region, IFNULL(lang_params,''), IFNULL(base_lat,''), IFNULL(base_lon,''), IFNULL(agent_ip,'') FROM nodes WHERE psk IS NOT NULL AND psk != '' AND IFNULL(engine_enabled,'true') != 'false' ORDER BY last_seen DESC;")
+        NODES=$(db_exec "SELECT node_name, region, IFNULL(lang_params,''), IFNULL(base_lat,''), IFNULL(base_lon,''), IFNULL(agent_ip,''), IFNULL(engine_enabled,'true') FROM nodes WHERE psk IS NOT NULL AND psk != '' ORDER BY last_seen DESC;")
 
-        while IFS='|' read -r n region lang_params lat lon node_ip; do
+        while IFS='|' read -r n region lang_params lat lon node_ip engine_enabled; do
             [ -z "$n" ] && continue
             [ "$SLOTS" -le 0 ] && break
             region="${region:-US}"
 
-            # 手动触发优先 (TG 按钮),不受间隔门禁限制
+            # 手动触发优先 (TG 按钮),不受自动调度开关与间隔门禁限制
             if consume_trigger "$n" "$region" "$lang_params" "$lat" "$lon" "$node_ip"; then
                 SLOTS=$((SLOTS - 1))
                 continue
             fi
+
+            [ "$engine_enabled" = "false" ] && continue
 
             # 同节点在跑即跳过
             if node_running "$n"; then
@@ -229,8 +230,9 @@ while true; do
 
             # [调度取证] 间隔门禁放行判据
             log "间隔调度: last=$LAST age=${AGE}s slots=$SLOTS"
-            launch_session "$n" "$region" "$lang_params" "$lat" "$lon" "$node_ip" "all"
-            SLOTS=$((SLOTS - 1))
+            if launch_session "$n" "$region" "$lang_params" "$lat" "$lon" "$node_ip" "all"; then
+                SLOTS=$((SLOTS - 1))
+            fi
         done <<< "$NODES"
     fi
 
