@@ -1,3 +1,6 @@
+facebook login
+xoso
+google
 real madrid
 tiktok
 livescore
@@ -7,7 +10,6 @@ brentford f.c. vs chelsea f.c. standings
 bayern munich
 manchester united
 norwich city
-xoso
 inter miami cf
 man city vs norwich city
 inter miami vs cruz azul
@@ -74,7 +76,6 @@ bournemouth vs everton
 julián alvarez
 epl
 liverpool vs nottm forest
-google
 man city
 ac milan
 al nassr
@@ -97,4 +98,3 @@ al-ettifaq vs al-nassr
 x
 fulham vs chelsea
 gold price
-elche cf vs fc barcelona standings
