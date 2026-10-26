@@ -1,3 +1,13 @@
+nbc
+gold price
+fc barcelona vs real madrid standings
+real madrid
+el clasico
+bayern munich
+premier league
+liverpool
+liverpool vs brighton
+inter milan
 chelsea
 chelsea vs spurs
 arsenal vs everton
@@ -8,9 +18,7 @@ barcelona vs real madrid
 al-faisaly vs al-nassr
 helen haines
 php
-bayern munich
 como 1907 vs manchester united f.c. standings
-real madrid
 bayern vs arsenal
 real madrid vs rb leipzig
 psg vs barcelona live
@@ -90,11 +98,3 @@ indonesia vs thailand
 portugal vs norway
 argentina vs burkina faso
 spain vs czechia
-croatia vs england
-france vs italy
-denmark vs portugal
-facebook
-argentina vs bolivia
-fifa asean cup 2026
-spain vs croatia
-australia vs brazil
